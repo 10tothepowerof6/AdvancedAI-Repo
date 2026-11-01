@@ -13,8 +13,7 @@ venv/
 env/
 ENV/
 
-# Test, type-check, and coverage output
-/tests/
+# Cache kiểm thử, kiểm tra kiểu và báo cáo coverage
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

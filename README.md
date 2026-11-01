@@ -97,9 +97,10 @@ Bàn đầy không có người thắng thì hòa.
 
 ## 7. Đọc phân công và tạo branch
 
-- [Phi Hùng — MCTS](caro-11x11/docs/Phi-Hung.md)
-- [Ngọc Phúc — Minimax và Alpha-Beta](caro-11x11/docs/Ngoc-Phuc.md)
-- [Tấn Phát — Rule-based](caro-11x11/docs/Tan-Phat.md)
+- [Phi Hùng - MCTS](caro-11x11/docs/Phi-Hung.md)
+- [Ngọc Phúc - Minimax và Alpha-Beta](caro-11x11/docs/Ngoc-Phuc.md)
+- [Tấn Phát - Rule-based](caro-11x11/docs/Tan-Phat.md)
+- [Xuân Triệu - Neural Network](caro-11x11/docs/Xuan-Trieu.md)
 
 Tài liệu gồm phạm vi file, API, giai đoạn thực hiện, milestone commit/push,
 hướng dẫn PR và checklist bàn giao. Đường dẫn trong từng tài liệu tính từ
