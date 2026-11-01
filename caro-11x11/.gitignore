@@ -14,6 +14,7 @@ env/
 ENV/
 
 # Test, type-check, and coverage output
+/tests/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
