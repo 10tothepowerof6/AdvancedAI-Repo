@@ -1,0 +1,55 @@
+# Python bytecode and build artifacts
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test, type-check, and coverage output
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Jupyter temporary files
+.ipynb_checkpoints/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Generated training artifacts; keep documentation/placeholders tracked.
+models/*
+!models/README.md
+!models/.gitkeep
+training/data/*
+!training/data/.gitkeep
+
+# Generated experiment outputs; source code and experiment configuration remain tracked.
+results/match_logs/*
+!results/match_logs/.gitkeep
+results/statistics/*
+!results/statistics/.gitkeep
+results/figures/*
+!results/figures/.gitkeep
+
+# Large local logs and profiling output
+*.log
+*.prof
