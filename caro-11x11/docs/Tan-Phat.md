@@ -376,4 +376,33 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 - [ ] Không đưa vào Git các file không liên quan, thư mục môi trường ảo (`.venv`) hoặc dữ liệu có dung lượng lớn.
 - [ ] Nhóm trưởng xác nhận kiểm thử tích hợp thành công trước khi chính thức nghiệm thu phần việc.
 
-*Trạng thái tài liệu: Kế hoạch triển khai kỹ thuật; chưa xác nhận tác tử, thực nghiệm hay PR đã hoàn thành.*
+*Trạng thái tài liệu: Giai đoạn 1 hoàn thành — tác tử, bộ test và notebook đã xác nhận. Giai đoạn 2 & 3 chờ triển khai.*
+
+---
+
+## 12. Nhật ký thực hiện — Giai đoạn 1
+
+### Trạng thái: Hoàn thành (chờ merge)
+
+### Quyết định thiết kế chính
+- **Fixture test dùng numpy trực tiếp** (không qua `CaroGame.step()`) để kiểm soát chính xác số quân mỗi bên mà không bị ràng buộc bởi thứ tự đặt quân.
+- **Tie-breaking tất định** (`seed=None`): ưu tiên `positional_score` cao → khoảng cách Manhattan tới tâm nhỏ nhất → tọa độ `(row, col)` nhỏ nhất.
+- **Quét toàn bàn** cho `win_now` và `block_urgent` (không giới hạn bán kính) để không bỏ sót cơ hội thắng/đe dọa thua.
+- **Tập ứng viên bán kính 2** chỉ áp dụng cho tầng `positional_fallback`.
+- `use_patterns=False` mặc định ở Giai đoạn 1; cờ này sẵn sàng cho Giai đoạn 2.
+
+### Thông số cấu hình đã xác nhận
+- `candidate_radius = 2`
+- `use_patterns = False`
+- `seed = None` (tất định)
+- `win_length = 5`
+
+### Hạn chế kỹ thuật đã biết
+- Fallback chưa nhận diện open-four, open-three (sẽ bổ sung Giai đoạn 2).
+- Đe dọa kép (double threat) không thể phòng thủ hoàn toàn trong 1 nước — đây là giới hạn tự nhiên của logic 1 tầng.
+- Bán kính ứng viên fallback = 2 có thể bỏ sót vị trí chiến lược xa quân cờ hiện có.
+
+### Kết quả kiểm thử
+- `tests/test_rule_based_agent.py`: **44/44 PASSED** (100%)
+- `pytest tests -v` (toàn dự án): **126/126 PASSED**
+- Không làm gãy bất kỳ bài test nền tảng nào.
