@@ -381,4 +381,44 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 - [ ] Không đưa vào Git các file không liên quan, thư mục môi trường ảo (`.venv`) hoặc dữ liệu có dung lượng lớn.
 - [ ] Nhóm trưởng xác nhận kiểm thử tích hợp thành công trước khi chính thức nghiệm thu phần việc.
 
-*Trạng thái tài liệu: Kế hoạch triển khai kỹ thuật; chưa xác nhận tác tử, thực nghiệm hay PR đã hoàn thành.*
+*Trạng thái tài liệu: Giai đoạn 1 đã cài đặt và kiểm thử, chờ review/merge. Giai đoạn 2 và 3 chưa thực hiện.*
+
+---
+
+## 12. Nhật ký thực hiện — Giai đoạn 1
+
+### Trạng thái: Đã cài đặt và kiểm thử, chờ review
+
+### Thành phần đã cài đặt (`agents/minimax_agent.py`)
+| Thành phần | Vai trò |
+| :--- | :--- |
+| `SearchState` | Trạng thái tìm kiếm: bản sao bàn cờ, người đến lượt, nước cuối, số nước, kết quả. `apply(action)` trả về trạng thái **mới**, cha giữ nguyên. |
+| `find_winner`, `window_counts` | Phát hiện thắng trên toàn bàn và đếm cửa sổ 5 ô còn sống cho mỗi bên. |
+| `terminal_score` | Điểm trạng thái kết thúc: thắng `+WIN_SCORE`, thua `−WIN_SCORE`, hòa `0`. |
+| `heuristic_score`, `heuristic_bound` | Điểm heuristic cho trạng thái chưa kết thúc và cận trên trị tuyệt đối của nó. |
+| `evaluate` | Điểm tổng hợp: kiểm tra terminal trước, sau đó mới dùng heuristic. |
+
+### Quyết định thiết kế chính
+- **Trạng thái bất biến qua `apply()`:** mỗi nước con sao chép bàn cờ (121 byte) thay vì đặt/gỡ quân tại chỗ. Ưu tiên tính đúng ở Giai đoạn 1; nếu Giai đoạn 2 đo thấy chi phí sao chép đáng kể sẽ cân nhắc lại và ghi nhận.
+- **Khớp quy ước engine:** phát hiện thắng chỉ xét 4 đường qua nước vừa đi; hòa khi bàn đầy; ở trạng thái kết thúc `current_player` giữ người vừa đi. Khi dựng `SearchState` từ bàn cờ bất kỳ, kết quả được xác định bằng quét toàn bàn (`find_winner`).
+- **Góc nhìn:** mọi hàm lượng giá nhận `perspective`; điểm dương có lợi cho bên đó; `evaluate(s, X) == -evaluate(s, O)`.
+- **Heuristic cửa sổ 5 ô:** 252 cửa sổ trên bàn 11×11. Cửa sổ chỉ chứa quân một bên được cộng `WINDOW_WEIGHTS[k] = (0, 1, 10, 100, 1000, 0)[k]` với `k` là số quân. Lý do: cửa sổ bị đối thủ chiếm không thể thành chuỗi thắng (phân biệt chuỗi mở/bị chặn tự nhiên); mỗi quân thêm tăng điểm 10 lần; nhận diện cả chuỗi có khe; tự tạo ưu tiên trung tâm.
+- **Terminal vượt trội:** `WIN_SCORE = 10 000 000`, gấp ~39,7 lần cận trên heuristic `252 × 1000 = 252 000`.
+
+### Kiểm thử (`tests/test_minimax_agent.py`)
+- Fixture dựng bằng chuỗi nước hợp lệ qua `CaroGame.step()`: X và O thắng theo 4 hướng với chuỗi 5 và chuỗi 6 (16 chuỗi), ván hòa bàn đầy 61 X / 60 O, và 5 ván ngẫu nhiên (seed 0–4). So sánh với engine **sau từng nước**.
+- Tính độc lập trạng thái: cha và mảng đầu vào giữ nguyên sau khi duyệt nước con/cháu; các nước con độc lập với nhau.
+- Lượng giá: quy ước điểm terminal, terminal vượt cận heuristic, đối xứng góc nhìn và đối xứng màu, thứ tự điểm các mẫu cho cả X và O, đếm cửa sổ tính tay (tâm 20, góc 3, mép 8), không thay đổi bàn cờ.
+- Đã thử cố ý cài 8 lỗi (không đổi lượt, sửa bàn cha, bỏ góc nhìn, chuỗi 6 không thắng, bỏ phát hiện hòa, bỏ ưu tiên terminal, sai trọng số, không sao chép đầu vào): bộ test đều phát hiện.
+
+### Notebook (`notebooks/02_minimax.ipynb`)
+- Đã hoàn thiện phần 1–4; phần 5–10 ghi rõ "Chưa thực hiện".
+- Phần 3: 37 chuỗi nước (17 fixture + 20 ván ngẫu nhiên seed 0–19), 1 768 bước so sánh, 0 bước lệch so với engine.
+- Phần 4: bảng điểm các mẫu cho cả X và O (2 mở 72 < 3 bị chặn 143 < 3 mở 367 < 4 bị chặn 1 158 < 4 mở 2 279) và heatmap điểm một quân theo vị trí.
+
+### Hạn chế kỹ thuật đã biết
+- Heuristic không xét bên đến lượt: hai bên cùng có thế "4 mở" cho điểm bằng nhau dù bên đến lượt thắng ngay. Giai đoạn 2 giao việc này cho tìm kiếm.
+- Không nhận diện đe dọa kép (ví dụ 4 + 3 mở) như một mẫu riêng; điểm là tổng tuyến tính.
+- Trọng số cấp số 10 có lý do thiết kế nhưng chưa tinh chỉnh bằng thực nghiệm.
+- Vùng 3×3 quanh tâm có cùng điểm vị trí; heuristic không phân biệt các ô này.
+- Mỗi lần lượng giá quét lại toàn bộ 252 cửa sổ (chưa cập nhật tăng dần).
