@@ -11,7 +11,10 @@ Quy ước giá trị (giữ nguyên ở mọi giai đoạn):
 - Kết quả ván `result` theo góc nhìn X giống engine: 1 X thắng, -1 O thắng, 0 hòa.
 - Q của một nút được cộng dồn theo góc nhìn của người vừa đi nước dẫn tới nút đó
   (`player_just_moved`): +1 thắng, -1 thua, 0 hòa. Nhờ vậy khi đứng ở nút cha,
-  người đến lượt chọn con có Q/N cao nhất chính là chọn nước tốt nhất cho mình.
+  Q/N của mỗi nút con đã là giá trị theo góc nhìn của người đến lượt, không cần đổi dấu.
+  Q/N chỉ là thành phần khai thác: khi tìm kiếm (Giai đoạn 2), nhánh được chọn theo điểm
+  UCT = Q/N + c·√(ln N_cha / N_con), có thêm thành phần khám phá; nước chính thức trả về
+  được chọn theo số lượt thăm N.
 
 Chưa có vòng tìm kiếm UCT và lớp MCTSAgent; hai phần này thuộc Giai đoạn 2.
 """
@@ -73,7 +76,10 @@ class MCTSState:
 
         Đầu vào chỉ có bàn cờ và người đến lượt nên `last_action` là None. Bàn cờ
         được quét toàn bộ một lần để nhận ra chuỗi thắng hoặc bàn đầy có sẵn.
-        Không suy luận lượt đi từ số quân; tin vào `player` do bên gọi cung cấp.
+        Khi chưa kết thúc, tin vào `player` do bên gọi cung cấp, không suy lượt từ số quân.
+        Khi đã kết thúc, `current_player` theo ngữ nghĩa engine là người vừa đi nước cuối,
+        suy từ bàn cờ: bên có chuỗi thắng; nếu hòa thì X khi X nhiều quân hơn O
+        (X đi trước), ngược lại là O.
         """
         if (not isinstance(board, np.ndarray) or board.ndim != 2
                 or board.shape[0] == 0 or board.shape[0] != board.shape[1]
@@ -92,8 +98,11 @@ class MCTSState:
             raise ValueError("Bàn cờ không hợp lệ: cả hai bên cùng có chuỗi thắng")
         if winners:
             state._result = winners.pop()
+            state.current_player = state._result
         elif state.move_count == state.board.size:
             state._result = 0
+            x_stones = int(np.count_nonzero(state.board == PLAYER_X))
+            state.current_player = PLAYER_X if x_stones > state.move_count - x_stones else PLAYER_O
         return state
 
     @classmethod
@@ -178,7 +187,8 @@ class MCTSNode:
     """Nút cây MCTS; chỉ giữ dữ liệu tìm kiếm, luật cờ nằm trong MCTSState.
 
     - `action`: nước dẫn từ nút cha tới nút này (None ở gốc).
-    - `player_just_moved`: người đã đi `action`; ở gốc là đối thủ của người đến lượt.
+    - `player_just_moved`: người đã đi `action`. Ở gốc chưa kết thúc là đối thủ của
+      người đến lượt; ở gốc đã kết thúc là `current_player` (engine giữ người vừa đi).
     - `visits` (N) và `value` (Q) khởi tạo bằng 0; Q tính theo góc nhìn
       `player_just_moved`, xem outcome_value().
     - `untried_actions`: ứng viên bán kính `radius` chưa mở rộng; rỗng nếu terminal.
@@ -194,8 +204,13 @@ class MCTSNode:
         self.state = state
         self.parent = parent
         self.action = action
-        self.player_just_moved = (-state.current_player if parent is None
-                                  else parent.state.current_player)
+        if parent is not None:
+            self.player_just_moved = parent.state.current_player
+        elif state.is_terminal():
+            # Tại terminal, current_player đã là người vừa đi nước cuối.
+            self.player_just_moved = state.current_player
+        else:
+            self.player_just_moved = -state.current_player
         self.radius = radius
         self.children: dict[Action, MCTSNode] = {}
         self.untried_actions: list[Action] = state.candidate_actions(radius)
@@ -218,12 +233,19 @@ class MCTSNode:
         return self.value / self.visits if self.visits else 0.0
 
     def expand(self, action: Action) -> "MCTSNode":
-        """Mở rộng một nước chưa thử; trạng thái của nút hiện tại không đổi."""
+        """Mở rộng một nước chưa thử; trạng thái của nút hiện tại không đổi.
+
+        Nước chỉ bị xóa khỏi `untried_actions` sau khi nút con được tạo thành công,
+        nên nước sai kiểu như (5.0, 5) bị từ chối mà không làm mất ứng viên (5, 5).
+        """
         if self.is_terminal():
             raise ValueError("Không mở rộng trạng thái đã kết thúc")
         if action not in self.untried_actions:
             raise ValueError(f"Nước {action!r} không nằm trong các nước chưa mở rộng")
-        self.untried_actions.remove(action)
-        child = MCTSNode(self.state.play(action), parent=self, action=action, radius=self.radius)
-        self.children[action] = child
+        # play() kiểm tra kiểu tọa độ và báo lỗi trước khi có bất kỳ thay đổi nào.
+        child_state = self.state.play(action)
+        key = child_state.last_action  # tọa độ đã chuẩn hóa về (int, int)
+        child = MCTSNode(child_state, parent=self, action=key, radius=self.radius)
+        self.untried_actions.remove(key)
+        self.children[key] = child
         return child

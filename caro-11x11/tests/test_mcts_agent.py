@@ -85,16 +85,18 @@ def test_from_board_matches_engine_without_history(name, moves, size, k, expecte
     game = CaroGame(size, k)
     for action in moves:
         # Thực thi: engine đi một nước, MCTS dựng lại trạng thái chỉ từ bàn cờ.
+        # Tại terminal truyền đối thủ của người vừa đi (như thể "đến lượt") để chắc
+        # from_board tự suy người vừa đi từ bàn cờ, không phụ thuộc tham số này.
         game.step(action)
-        state = MCTSState.from_board(game.board, game.current_player, win_length=k)
-        # Kiểm chứng: khớp engine ở mọi thông tin suy ra được từ bàn cờ.
+        player = -game.current_player if game.is_terminal() else game.current_player
+        state = MCTSState.from_board(game.board, player, win_length=k)
+        # Kiểm chứng: khớp engine ở mọi thông tin suy ra được từ bàn cờ, kể cả terminal.
         np.testing.assert_array_equal(state.board, game.board)
         assert state.move_count == game.move_count
         assert state.result() == game.result()
         assert state.last_action is None
-        if not game.is_terminal():
-            assert state.current_player == game.current_player
-            assert state.legal_actions() == game.legal_actions()
+        assert state.current_player == game.current_player
+        assert state.legal_actions() == game.legal_actions()
 
 
 def test_from_board_empty_board_and_o_to_move():
@@ -209,6 +211,28 @@ def test_root_player_just_moved_when_o_to_move():
     assert MCTSNode.root(board, -1).player_just_moved == 1
 
 
+_TERMINAL = [s for s in SEQUENCES if s[4] is not None]
+
+
+@pytest.mark.parametrize("name,moves,size,k,expected", _TERMINAL, ids=[s[0] for s in _TERMINAL])
+def test_terminal_root_player_just_moved_is_last_mover(name, moves, size, k, expected):
+    # Chuẩn bị: chạy ván tới terminal trên engine; engine giữ current_player = người vừa đi.
+    game = CaroGame(size, k)
+    for action in moves:
+        game.step(action)
+    last_mover = game.current_player
+    # Thực thi: dựng gốc theo hai đường — chép từ engine và chỉ từ bàn cờ
+    # (truyền đối thủ của người vừa đi như thể "đến lượt").
+    from_game = MCTSNode(MCTSState.from_game(game), radius=DEFAULT_RADIUS)
+    from_board = MCTSNode(MCTSState.from_board(game.board, -last_mover, win_length=k))
+    # Kiểm chứng: gốc terminal lấy current_player làm player_just_moved, không đổi dấu.
+    for root in (from_game, from_board):
+        assert root.is_terminal() and root.state.result() == expected
+        assert root.state.current_player == last_mover
+        assert root.player_just_moved == last_mover
+        assert root.untried_actions == []
+
+
 def test_expand_links_child_and_keeps_parent_unchanged():
     # Chuẩn bị: gốc từ thế X(5,5), O(5,6), đến lượt X; lưu bàn cờ và ứng viên ban đầu.
     board = _small_board()
@@ -240,6 +264,33 @@ def test_expand_rejects_unknown_or_repeated_action():
     for action in [(4, 4), (5, 5), (0, 0)]:  # đã mở rộng, đã có quân, ngoài tập ứng viên
         with pytest.raises(ValueError):
             root.expand(action)
+
+
+@pytest.mark.parametrize("bad_action", [(5.0, 5), (5, np.float64(5.0))],
+                         ids=["hang_so_thuc_5.0", "cot_numpy_float"])
+def test_expand_wrong_type_keeps_valid_candidate(bad_action):
+    # Chuẩn bị: X(4,4), O(4,5), đến lượt X; (5,5) là ứng viên hợp lệ.
+    board = np.zeros((11, 11), dtype=np.int8)
+    board[4, 4], board[4, 5] = 1, -1
+    root = MCTSNode.root(board, 1)
+    untried_before = list(root.untried_actions)
+    assert (5, 5) in untried_before
+    # Thực thi: tọa độ sai kiểu bằng (5, 5) về giá trị nhưng không phải số nguyên.
+    with pytest.raises(ValueError):
+        root.expand(bad_action)
+    # Kiểm chứng: không tạo con, không mất ứng viên; vẫn mở rộng được (5, 5) đúng kiểu.
+    assert root.children == {}
+    assert root.untried_actions == untried_before
+    child = root.expand((5, 5))
+    assert root.children == {(5, 5): child} and (5, 5) not in root.untried_actions
+
+
+def test_expand_normalizes_numpy_integer_action():
+    # Tọa độ kiểu số nguyên NumPy hợp lệ; khóa trong cây được chuẩn hóa về int.
+    root = MCTSNode.root(_small_board(), 1)
+    child = root.expand((np.int64(4), np.int64(4)))
+    assert child.action == (4, 4) and all(type(x) is int for x in child.action)
+    assert list(root.children) == [(4, 4)] and (4, 4) not in root.untried_actions
 
 
 def test_fully_expanded_after_all_candidates():
