@@ -379,4 +379,52 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 - [ ] Không đưa vào Git các file không liên quan, thư mục môi trường ảo (`.venv`) hoặc dữ liệu có dung lượng lớn.
 - [ ] Nhóm trưởng xác nhận kiểm thử tích hợp thành công trước khi chính thức nghiệm thu phần việc.
 
-*Trạng thái tài liệu: Kế hoạch triển khai kỹ thuật; chưa xác nhận tác tử, thực nghiệm hay PR đã hoàn thành.*
+---
+
+## 12. Nhật ký thực hiện
+
+### Giai đoạn 0 — Môi trường (07/11/2026)
+- Python 3.11.9 64-bit, `pip check` không lỗi; NumPy 2.4.6, PyTorch 2.14.1+cu126 (CUDA khả dụng, MCTS không dùng GPU).
+- Máy chạy: Intel Core i7-13650HX, Windows 11. Toàn bộ 82 test nền tảng pass; notebook 00 và 03 (bản khung) chạy hết từ kernel mới.
+
+### Giai đoạn 1 — Trạng thái và cây tìm kiếm (nhánh `feature/mcts-foundation`)
+
+**Quyết định thiết kế** (trong `agents/mcts_agent.py`):
+- **`MCTSState` — dữ liệu thuộc luật cờ:** `board` (bản sao `int8`), `current_player`, `last_action`, `move_count`, kết quả.
+  Engine không có API nạp bàn cờ nên `from_board(board, player)` sao chép đầu vào, quét toàn bàn một lần để nhận ra
+  chuỗi thắng/bàn đầy có sẵn; `last_action` khi đó là `None`. `step()` theo đúng luật `CaroGame` (kiểm tra thắng qua
+  nước vừa đi, ≥ 5 quân kể cả bị chặn hai đầu, bàn đầy là hòa) và nước sai không làm đổi trạng thái; `play()` trả về
+  trạng thái mới. `current_player` giữ ngữ nghĩa engine: tại terminal vẫn là người vừa đi.
+  Lượt đi tin vào `player` do bên gọi đưa vào, không suy từ số quân.
+- **`MCTSNode` — dữ liệu thuộc tìm kiếm:** `parent`, `action` dẫn tới nút, `children`, `untried_actions`
+  (ứng viên bán kính 2, sắp theo hàng/cột; rỗng nếu terminal), `visits` (N = 0) và `value` (Q = 0.0) khi tạo.
+  `expand(action)` chỉ nhận nước chưa mở rộng và không làm đổi trạng thái của nút cha.
+- **Quy ước giá trị:** `result` theo góc nhìn X như engine. Q của nút cộng dồn theo góc nhìn `player_just_moved`
+  (người đi nước dẫn tới nút; ở gốc là đối thủ của người đến lượt): thắng +1, thua −1, hòa 0,
+  tức `outcome_value(result, player) = result × player`. Ví dụ: X thắng → nút do X vừa đi nhận +1, nút do O vừa đi
+  nhận −1; O thắng thì ngược lại; hòa cả hai nhận 0. Người đến lượt ở nút cha luôn chọn con có Q/N cao nhất.
+- **Cấu hình khởi đầu:** bán kính 2, c = √2 (dùng từ Giai đoạn 2), seed 42 trong notebook, ngân sách
+  `SearchBudget` chung (1.000 mô phỏng hoặc 2,0 giây/nước).
+- **Định nghĩa thống kê (áp dụng từ Giai đoạn 2):** `simulations` = mô phỏng hoàn thành và đã lan truyền ngược;
+  `nodes_visited` = số nút mới tạo trong lượt; `pruned_nodes` = 0 (lọc ứng viên không tính là cắt tỉa).
+
+**Kiểm thử:**
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_mcts_agent.py -v   # 53 passed, 0 failed
+.\.venv\Scripts\python.exe -m pytest tests -v                      # 135 passed, 0 failed (82 chung + 53 MCTS)
+```
+Fixture: X thắng ngang, X thắng dọc, O thắng chéo chính, O thắng chéo phụ, X thắng sáu quân bị chặn hai đầu,
+hòa 3×3, ván đang chơi; mỗi fixture đối chiếu từng bước với engine cả qua `step()` lẫn qua `from_board()`.
+Đã kiểm tra bộ test phát hiện lỗi bằng cách cố ý cài sai (luật thắng, góc nhìn giá trị, công thức giá trị,
+không sao chép trạng thái): mỗi lỗi đều làm test thất bại, sau đó khôi phục mã đúng.
+
+**Notebook:** hoàn thiện mục 1–4 của `notebooks/03_mcts.ipynb`.
+
+**Hạn chế đã biết:**
+- Chưa có vòng tìm kiếm UCT, rollout và lớp `MCTSAgent`; chưa tuyên bố khả năng thi đấu.
+- Tiêu chí "terminal không kích hoạt rollout" mới kiểm được phần không mở rộng (nút terminal không có ứng viên,
+  `expand` báo lỗi). Phần không rollout sẽ có test riêng ở Giai đoạn 2 khi rollout được cài đặt.
+- `from_board` không kiểm tra tính nhất quán giữa số quân và lượt đi.
+- `step()` dùng vòng lặp Python trên mảng NumPy; tốc độ rollout sẽ được đo và tối ưu ở Giai đoạn 2.
+
+*Trạng thái tài liệu: Giai đoạn 1 đã cài đặt và kiểm thử cục bộ; Giai đoạn 2–3 chưa thực hiện.*
