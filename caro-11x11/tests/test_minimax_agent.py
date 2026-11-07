@@ -11,6 +11,7 @@ from agents.minimax_agent import (
     WIN_SCORE,
     WINDOW_WEIGHTS,
     SearchState,
+    default_weights,
     evaluate,
     find_winner,
     heuristic_bound,
@@ -400,7 +401,177 @@ def test_evaluation_does_not_mutate_board():
     np.testing.assert_array_equal(state.board, game.board)
 
 
-@pytest.mark.parametrize("weights", [(1, 2, 3), (0, 1, 10, 100, 1000, -1), (0, 1, 10, 100, 1000, 0, 0)])
+@pytest.mark.parametrize("weights", [(1, 2, 3), (0, 1, 10, 100, 1000, -1), (0, 1, 10, 100, 1000, 0, 0),
+                                     (0, 1.5, 10, 100, 1000, 0), (0, True, 10, 100, 1000, 0)])
 def test_invalid_weights_rejected(weights):
     with pytest.raises(ValueError):
         heuristic_score(np.zeros((11, 11), dtype=np.int8), X, weights=weights)
+
+
+# Cận heuristic phải nhỏ hơn WIN_SCORE (góp ý review PR #17)
+
+# 252 cửa sổ: trọng số lớn nhất 39 682 cho cận 9 999 864 < WIN_SCORE, 39 683 cho 10 000 116.
+LARGEST_ALLOWED = (WIN_SCORE - 1) // 252
+
+
+def test_weights_with_bound_reaching_win_score_rejected():
+    # Arrange: ví dụ trong review - một quân X ở tâm từng được 20 000 000 > WIN_SCORE
+    weights = (0, 1_000_000, 0, 0, 0, 0)
+    state = SearchState.initial().apply((5, 5))
+    # Act + Assert
+    with pytest.raises(ValueError, match="WIN_SCORE"):
+        evaluate(state, X, weights=weights)
+    with pytest.raises(ValueError, match="WIN_SCORE"):
+        heuristic_score(state.board, X, weights=weights)
+    with pytest.raises(ValueError, match="WIN_SCORE"):
+        heuristic_bound(weights=weights)
+
+
+def test_weights_bound_boundary():
+    # Arrange
+    allowed = (0, LARGEST_ALLOWED, 0, 0, 0, 0)
+    too_large = (0, LARGEST_ALLOWED + 1, 0, 0, 0, 0)
+    # Act + Assert
+    assert heuristic_bound(weights=allowed) == 252 * LARGEST_ALLOWED < WIN_SCORE
+    with pytest.raises(ValueError):
+        heuristic_bound(weights=too_large)
+
+
+def test_weights_bound_equal_to_win_score_rejected():
+    # Arrange: bàn 4×4 luật 4 quân có 10 cửa sổ nên cận chạm đúng WIN_SCORE
+    exact = (0, WIN_SCORE // 10, 0, 0, 0)
+    below = (0, WIN_SCORE // 10 - 1, 0, 0, 0)
+    # Act + Assert
+    assert heuristic_bound(4, 4, below) == WIN_SCORE - 10
+    with pytest.raises(ValueError):
+        heuristic_bound(4, 4, exact)
+    with pytest.raises(ValueError):
+        evaluate(SearchState.initial(4, 4), X, weights=exact)
+
+
+def test_won_state_beats_playing_states_with_largest_allowed_weights():
+    # Arrange: trọng số lớn nhất được phép cho mọi loại cửa sổ còn sống
+    weights = (0,) + (LARGEST_ALLOWED,) * 4 + (0,)
+    moves, _ = FIXTURES["X-ngang-5"]
+    won = SearchState.initial()
+    for move in moves:
+        won = won.apply(move)
+    playing = [SearchState.initial().apply((5, 5))]
+    for seed in range(10):
+        game = _random_board(seed, n_moves=10 + seed * 4)
+        if not game.is_terminal():
+            playing.append(SearchState(game.board, game.current_player))
+    # Act
+    won_score = evaluate(won, X, weights=weights)
+    # Assert
+    assert won.result() == X and won_score == WIN_SCORE
+    assert all(evaluate(s, p, weights=weights) < won_score for s in playing for p in (X, O))
+
+
+# Trọng số mặc định theo win_length (góp ý review PR #17)
+
+def test_default_weights_match_window_weights():
+    assert default_weights() == default_weights(5, 11) == WINDOW_WEIGHTS
+
+
+@pytest.mark.parametrize("size,win_length", [(3, 3), (6, 4), (11, 1), (11, 2), (11, 5), (11, 7), (11, 11)])
+def test_default_weights_follow_win_length(size, win_length):
+    # Act
+    weights = default_weights(win_length, size)
+    # Assert
+    live = weights[:-1]
+    assert len(weights) == win_length + 1 and weights[0] == weights[-1] == 0
+    assert all(a < b for a, b in zip(live[1:], live[2:]))
+    assert heuristic_bound(size, win_length) < WIN_SCORE
+
+
+@pytest.mark.parametrize("size,win_length", [(3, 3), (6, 4), (11, 2), (11, 7), (11, 11)])
+def test_evaluate_without_weights_on_other_rules(size, win_length):
+    # Arrange
+    empty = SearchState.initial(size, win_length)
+    center = size // 2
+    # Act
+    child = empty.apply((center, center))
+    # Assert: bàn trống cân bằng; một quân ở tâm có lợi cho bên vừa đi
+    assert evaluate(empty, X) == 0
+    assert evaluate(child, X) == -evaluate(child, O) > 0
+
+
+def test_evaluate_3x3_full_game_without_weights():
+    # Arrange: X thắng ở chéo chính sau 5 nước trên bàn 3×3 luật 3 quân
+    moves = [(1, 1), (0, 1), (0, 0), (2, 0), (2, 2)]
+    state = SearchState.initial(3, 3)
+    scores = [evaluate(state, X)]
+    # Act
+    for move in moves:
+        state = state.apply(move)
+        scores.append(evaluate(state, X))
+    # Assert
+    assert state.result() == X and scores[-1] == WIN_SCORE
+    assert all(abs(s) <= heuristic_bound(3, 3) for s in scores[:-1])
+
+
+@pytest.mark.parametrize("size,win_length", [(0, 1), (3, 0), (3, 4), (3, True), (True, 1), (3, 2.0)])
+def test_default_weights_rejects_invalid_rule(size, win_length):
+    with pytest.raises(ValueError):
+        default_weights(win_length, size)
+
+
+# Bàn cờ chỉ đọc (góp ý review PR #17)
+
+def _states_for_readonly():
+    moves, _ = FIXTURES["X-ngang-5"]
+    terminal = SearchState.initial()
+    for move in moves:
+        terminal = terminal.apply(move)
+    game = _random_board(seed=2, n_moves=12)
+    return {"initial": SearchState.initial(),
+            "từ-mảng": SearchState(game.board, game.current_player),
+            "con": SearchState.initial().apply((5, 5)),
+            "kết-thúc": terminal}
+
+
+@pytest.mark.parametrize("name", ["initial", "từ-mảng", "con", "kết-thúc"])
+def test_board_is_read_only(name):
+    # Arrange
+    state = _states_for_readonly()[name]
+    before = state.board.copy()
+    # Act + Assert
+    with pytest.raises(ValueError):
+        state.board[0, 10] = X
+    with pytest.raises(ValueError):
+        state.board += 1
+    np.testing.assert_array_equal(state.board, before)
+
+
+def test_direct_five_in_row_write_rejected_and_state_consistent():
+    # Arrange: tình huống trong review - ghi thẳng 5 quân X lên một hàng
+    state = SearchState.initial()
+    # Act
+    with pytest.raises(ValueError):
+        state.board[0, :5] = X
+    # Assert
+    assert not state.board.any()
+    assert state.result() is None and state.move_count == 0
+
+
+def test_apply_still_works_on_read_only_board():
+    # Arrange
+    parent = SearchState.initial()
+    # Act
+    child = parent.apply((5, 5))
+    grandchild = child.apply((5, 6))
+    # Assert
+    assert child.board[5, 5] == X and grandchild.board[5, 6] == O
+    assert not parent.board.any()
+    assert not child.board.flags.writeable and not grandchild.board.flags.writeable
+
+
+def test_input_board_stays_writable():
+    # Arrange
+    board = np.zeros((11, 11), dtype=np.int8)
+    # Act
+    SearchState(board, X)
+    board[5, 5] = X
+    # Assert
+    assert board.flags.writeable and board[5, 5] == X
