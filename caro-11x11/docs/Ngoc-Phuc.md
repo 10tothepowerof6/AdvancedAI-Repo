@@ -422,3 +422,14 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 - Trọng số cấp số 10 có lý do thiết kế nhưng chưa tinh chỉnh bằng thực nghiệm.
 - Vùng 3×3 quanh tâm có cùng điểm vị trí; heuristic không phân biệt các ô này.
 - Mỗi lần lượng giá quét lại toàn bộ 252 cửa sổ (chưa cập nhật tăng dần).
+
+### Sửa theo review PR #17
+| Góp ý | Cách sửa | Test bổ sung |
+| :--- | :--- | :--- |
+| Trọng số `(0, 1 000 000, 0, 0, 0, 0)` cho một quân ở tâm 20 000 000 điểm, vượt `WIN_SCORE`. | `_validate_weights` tính cận `số cửa sổ × trọng số lớn nhất` và từ chối khi cận `>= WIN_SCORE`; áp dụng cho `heuristic_score`, `evaluate`, `heuristic_bound`. | Ví dụ trong review bị từ chối; biên 39 682 được nhận, 39 683 bị từ chối (bàn 11×11); bàn 4×4 luật 4 quân với cận đúng bằng `WIN_SCORE` bị từ chối; với trọng số lớn nhất được phép, ván đã thắng vẫn cao điểm hơn mọi thế đang chơi. |
+| `SearchState.initial(3, 3)` hợp lệ nhưng `evaluate()` báo lỗi vì trọng số mặc định chỉ dành cho luật 5 quân. | Thêm `default_weights(win_length, board_size)`: cửa sổ `k` quân được `10^(k-1)`, bằng đúng `WINDOW_WEIGHTS` với luật 5 quân trên bàn 11×11. Chỉ khi chuỗi thắng quá dài làm cận chạm `WIN_SCORE` mới giảm cơ số (tối thiểu 2). `weights=None` trong `evaluate`/`heuristic_score`/`heuristic_bound` dùng bộ này theo `win_length` và cạnh bàn. | `evaluate` không truyền `weights` trên các luật 3×3, 6×6/4, 11×11 với 2, 7, 11 quân; trọn một ván 3×3 đến khi X thắng; tham số luật không hợp lệ bị từ chối. |
+| Ghi trực tiếp 5 quân X vào `state.board` tạo chuỗi thắng nhưng `result()` vẫn là `None`, `move_count` vẫn là 0. | Mảng `board` chuyển sang chỉ đọc sau khi khởi tạo trạng thái gốc và sau khi `apply()` ghi nước đi vào bản sao. Mảng đầu vào của người gọi vẫn ghi được. | Ghi trực tiếp bị từ chối ở trạng thái gốc, trạng thái dựng từ mảng, trạng thái con và trạng thái kết thúc; tình huống 5 quân trong review giữ nguyên `result`/`move_count`; `apply()` vẫn tạo được con và cháu. |
+
+- Toàn bộ test của dự án: 242 pass (trước khi sửa: 209).
+- Đã cố ý cài lại từng lỗi (bỏ kiểm tra cận, dùng `>` thay `>=`, bỏ chỉ đọc ở `__init__`, bỏ chỉ đọc ở `apply`, `evaluate` dùng lại `WINDOW_WEIGHTS`): cả 5 đều bị test bắt.
+- Notebook chạy lại cho kết quả giống hệt bản đã commit, vì trọng số mặc định cho luật 5 quân không đổi.
