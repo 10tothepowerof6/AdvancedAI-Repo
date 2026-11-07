@@ -27,6 +27,7 @@ DIRECTIONS: tuple[tuple[int, int], ...] = ((0, 1), (1, 0), (1, 1), (1, -1))
 # Chỉ số = số quân (0..5). Mỗi quân thêm vào cửa sổ tăng điểm gấp 10 lần để
 # một cửa sổ "gần thắng" hơn luôn nặng hơn vài cửa sổ yếu hơn cộng lại.
 # Cửa sổ đủ 5 quân là trạng thái kết thúc, do terminal_score xử lý nên trọng số 0.
+# Bằng default_weights(5, 11); luật thắng khác dùng default_weights(win_length, cạnh bàn).
 WINDOW_WEIGHTS: tuple[int, ...] = (0, 1, 10, 100, 1_000, 0)
 
 # Điểm thắng/thua tuyệt đối. Phải lớn hơn hẳn mọi điểm heuristic có thể đạt
@@ -68,6 +69,13 @@ def _validate_player(player: int, name: str = "Người chơi") -> int:
     return int(player)
 
 
+def _validate_win_length(win_length: int, board_size: int) -> int:
+    if (isinstance(win_length, (bool, np.bool_)) or not isinstance(win_length, Integral)
+            or not 1 <= win_length <= board_size):
+        raise ValueError("win_length phải là số nguyên dương không lớn hơn cạnh bàn cờ")
+    return int(win_length)
+
+
 def window_counts(board: np.ndarray, win_length: int = WIN_LENGTH) -> dict[int, np.ndarray]:
     """Đếm số cửa sổ "còn sống" của mỗi bên theo số quân trong cửa sổ.
 
@@ -103,6 +111,8 @@ class SearchState:
 
     apply() luôn trả về đối tượng mới với bản sao bàn cờ riêng, nên duyệt các
     nước con không bao giờ làm thay đổi trạng thái cha hay mảng board đầu vào.
+    Mảng board ở chế độ chỉ đọc: ghi trực tiếp (state.board[r, c] = ...) bị
+    numpy từ chối, vì như vậy sẽ làm result và move_count lệch khỏi bàn cờ.
     Quy ước theo engine: khi ván kết thúc, current_player giữ người vừa đi
     nước cuối; result theo góc nhìn X (None, 1, -1, 0).
     """
@@ -113,11 +123,9 @@ class SearchState:
                  win_length: int = WIN_LENGTH):
         _validate_board(board)
         self.current_player = _validate_player(current_player)
-        if (isinstance(win_length, bool) or not isinstance(win_length, Integral)
-                or not 1 <= win_length <= board.shape[0]):
-            raise ValueError("win_length phải là số nguyên dương không lớn hơn cạnh bàn cờ")
-        self.win_length = int(win_length)
+        self.win_length = _validate_win_length(win_length, board.shape[0])
         self.board = board.astype(np.int8, copy=True)
+        self.board.setflags(write=False)
         self.last_action: Action | None = None
         self.move_count = int(np.count_nonzero(self.board))
         winner = find_winner(self.board, self.win_length)
@@ -162,9 +170,11 @@ class SearchState:
         if self.board[row, col] != EMPTY:
             raise ValueError("Ô cờ đã có quân")
 
+        board = self.board.copy()  # bản sao của mảng chỉ đọc vẫn ghi được
+        board[row, col] = self.current_player
+        board.setflags(write=False)
         child = object.__new__(SearchState)
-        child.board = self.board.copy()
-        child.board[row, col] = self.current_player
+        child.board = board
         child.win_length = self.win_length
         child.last_action = (row, col)
         child.move_count = self.move_count + 1
@@ -203,38 +213,91 @@ def terminal_score(result: int, perspective: int) -> int:
     return WIN_SCORE * int(result) * _validate_player(perspective, "Góc nhìn")
 
 
-def _validate_weights(weights: tuple[int, ...], win_length: int) -> np.ndarray:
-    array = np.asarray(weights, dtype=np.int64)
-    if array.shape != (win_length + 1,) or (array < 0).any():
-        raise ValueError(f"Trọng số phải gồm {win_length + 1} số không âm")
-    return array
+def _validate_board_size(board_size: int) -> int:
+    if isinstance(board_size, (bool, np.bool_)) or not isinstance(board_size, Integral) or board_size < 1:
+        raise ValueError("Cạnh bàn cờ phải là số nguyên dương")
+    return int(board_size)
+
+
+def default_weights(win_length: int = WIN_LENGTH, board_size: int = BOARD_SIZE) -> tuple[int, ...]:
+    """Bộ trọng số mặc định cho luật thắng win_length quân trên bàn board_size.
+
+    Cửa sổ có k quân (1 <= k < win_length) được base ** (k - 1); cửa sổ trống
+    và cửa sổ đủ quân (đã là trạng thái kết thúc) được 0. base = 10 như
+    WINDOW_WEIGHTS; chỉ khi chuỗi thắng quá dài khiến cận heuristic chạm
+    WIN_SCORE thì mới giảm base (tối thiểu 2, vẫn tăng ngặt theo số quân).
+    Luật 5 quân trên bàn 11×11 cho đúng WINDOW_WEIGHTS.
+    """
+    board_size = _validate_board_size(board_size)
+    win_length = _validate_win_length(win_length, board_size)
+    n_windows = len(_window_indices(board_size, win_length))
+    for base in range(10, 1, -1):
+        weights = (0, *(base ** k for k in range(win_length - 1)), 0)
+        if n_windows * max(weights) < WIN_SCORE:
+            return weights
+    raise ValueError("Không có bộ trọng số mặc định giữ cận heuristic nhỏ hơn WIN_SCORE")
+
+
+def _validate_weights(weights: tuple[int, ...], win_length: int, board_size: int) -> np.ndarray:
+    """Kiểm tra trọng số và cận heuristic tương ứng phải nhỏ hơn WIN_SCORE.
+
+    Nếu cận chạm WIN_SCORE, một thế đang chơi có thể được điểm cao hơn một ván
+    đã thắng và Minimax sẽ bỏ qua nước thắng, nên cấu hình đó bị từ chối.
+    """
+    values = tuple(weights)
+    if (len(values) != win_length + 1
+            or any(isinstance(w, (bool, np.bool_)) or not isinstance(w, Integral) or w < 0 for w in values)):
+        raise ValueError(f"Trọng số phải gồm {win_length + 1} số nguyên không âm")
+    bound = len(_window_indices(board_size, win_length)) * int(max(values))
+    if bound >= WIN_SCORE:
+        raise ValueError(f"Cận heuristic {bound} phải nhỏ hơn WIN_SCORE = {WIN_SCORE} "
+                         "để ván đã thắng luôn được điểm cao hơn mọi thế đang chơi")
+    return np.array(values, dtype=np.int64)
 
 
 def heuristic_bound(board_size: int = BOARD_SIZE, win_length: int = WIN_LENGTH,
-                    weights: tuple[int, ...] = WINDOW_WEIGHTS) -> int:
-    """Cận trên |heuristic_score|: mọi cửa sổ đều mang trọng số lớn nhất."""
-    n_windows = len(_window_indices(board_size, win_length))
-    return n_windows * int(_validate_weights(weights, win_length).max())
+                    weights: tuple[int, ...] | None = None) -> int:
+    """Cận trên |heuristic_score|: mọi cửa sổ đều mang trọng số lớn nhất.
+
+    weights=None dùng default_weights(win_length, board_size). Luôn nhỏ hơn
+    WIN_SCORE vì cấu hình vượt cận bị _validate_weights từ chối.
+    """
+    board_size = _validate_board_size(board_size)
+    win_length = _validate_win_length(win_length, board_size)
+    if weights is None:
+        weights = default_weights(win_length, board_size)
+    weight_array = _validate_weights(weights, win_length, board_size)
+    return len(_window_indices(board_size, win_length)) * int(weight_array.max())
 
 
 def heuristic_score(board: np.ndarray, perspective: int, *,
                     win_length: int = WIN_LENGTH,
-                    weights: tuple[int, ...] = WINDOW_WEIGHTS) -> int:
+                    weights: tuple[int, ...] | None = None) -> int:
     """Điểm heuristic cho trạng thái chưa kết thúc, theo góc nhìn perspective.
 
     Tổng trọng số các cửa sổ còn sống của perspective trừ của đối thủ.
     Hàm đối xứng: không cộng thêm lợi thế cho bên đang đến lượt.
+    weights=None dùng default_weights theo win_length và cạnh bàn cờ.
     """
     perspective = _validate_player(perspective, "Góc nhìn")
-    weight_array = _validate_weights(weights, win_length)
+    _validate_board(board)
+    size = board.shape[0]
+    win_length = _validate_win_length(win_length, size)
+    if weights is None:
+        weights = default_weights(win_length, size)
+    weight_array = _validate_weights(weights, win_length, size)
     counts = window_counts(board, win_length)
     score = int(weight_array @ counts[1]) - int(weight_array @ counts[-1])
     return perspective * score
 
 
 def evaluate(state: SearchState, perspective: int, *,
-             weights: tuple[int, ...] = WINDOW_WEIGHTS) -> int:
-    """Lượng giá trạng thái: terminal dùng terminal_score, còn lại dùng heuristic."""
+             weights: tuple[int, ...] | None = None) -> int:
+    """Lượng giá trạng thái: terminal dùng terminal_score, còn lại dùng heuristic.
+
+    weights=None chọn bộ trọng số mặc định theo win_length và kích thước bàn
+    của chính state, nên mọi trạng thái tạo được bằng SearchState đều lượng giá được.
+    """
     if state.is_terminal():
         return terminal_score(state.result(), perspective)
     return heuristic_score(state.board, perspective, win_length=state.win_length, weights=weights)
