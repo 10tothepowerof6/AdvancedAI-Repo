@@ -385,7 +385,7 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 
 ---
 
-## 12. Nhật ký thực hiện — Giai đoạn 1
+## 12. Nhật ký thực hiện - Giai đoạn 1
 
 ### Trạng thái: Đã cài đặt và kiểm thử, chờ review
 
@@ -394,7 +394,7 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 | :--- | :--- |
 | `SearchState` | Trạng thái tìm kiếm: bản sao bàn cờ, người đến lượt, nước cuối, số nước, kết quả. `apply(action)` trả về trạng thái **mới**, cha giữ nguyên. |
 | `find_winner`, `window_counts` | Phát hiện thắng trên toàn bàn và đếm cửa sổ 5 ô còn sống cho mỗi bên. |
-| `terminal_score` | Điểm trạng thái kết thúc: thắng `+WIN_SCORE`, thua `−WIN_SCORE`, hòa `0`. |
+| `terminal_score` | Điểm trạng thái kết thúc: thắng `+WIN_SCORE`, thua `-WIN_SCORE`, hòa `0`. |
 | `heuristic_score`, `heuristic_bound` | Điểm heuristic cho trạng thái chưa kết thúc và cận trên trị tuyệt đối của nó. |
 | `evaluate` | Điểm tổng hợp: kiểm tra terminal trước, sau đó mới dùng heuristic. |
 
@@ -406,14 +406,14 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 - **Terminal vượt trội:** `WIN_SCORE = 10 000 000`, gấp ~39,7 lần cận trên heuristic `252 × 1000 = 252 000`.
 
 ### Kiểm thử (`tests/test_minimax_agent.py`)
-- Fixture dựng bằng chuỗi nước hợp lệ qua `CaroGame.step()`: X và O thắng theo 4 hướng với chuỗi 5 và chuỗi 6 (16 chuỗi), ván hòa bàn đầy 61 X / 60 O, và 5 ván ngẫu nhiên (seed 0–4). So sánh với engine **sau từng nước**.
+- Fixture dựng bằng chuỗi nước hợp lệ qua `CaroGame.step()`: X và O thắng theo 4 hướng với chuỗi 5 và chuỗi 6 (16 chuỗi), ván hòa bàn đầy 61 X / 60 O, và 5 ván ngẫu nhiên (seed 0-4). So sánh với engine **sau từng nước**.
 - Tính độc lập trạng thái: cha và mảng đầu vào giữ nguyên sau khi duyệt nước con/cháu; các nước con độc lập với nhau.
 - Lượng giá: quy ước điểm terminal, terminal vượt cận heuristic, đối xứng góc nhìn và đối xứng màu, thứ tự điểm các mẫu cho cả X và O, đếm cửa sổ tính tay (tâm 20, góc 3, mép 8), không thay đổi bàn cờ.
 - Đã thử cố ý cài 8 lỗi (không đổi lượt, sửa bàn cha, bỏ góc nhìn, chuỗi 6 không thắng, bỏ phát hiện hòa, bỏ ưu tiên terminal, sai trọng số, không sao chép đầu vào): bộ test đều phát hiện.
 
 ### Notebook (`notebooks/02_minimax.ipynb`)
-- Đã hoàn thiện phần 1–4; phần 5–10 ghi rõ "Chưa thực hiện".
-- Phần 3: 37 chuỗi nước (17 fixture + 20 ván ngẫu nhiên seed 0–19), 1 768 bước so sánh, 0 bước lệch so với engine.
+- Đã hoàn thiện phần 1-4; phần 5-10 ghi rõ "Chưa thực hiện".
+- Phần 3: 37 chuỗi nước (17 fixture + 20 ván ngẫu nhiên seed 0-19), 1 768 bước so sánh, 0 bước lệch so với engine.
 - Phần 4: bảng điểm các mẫu cho cả X và O (2 mở 72 < 3 bị chặn 143 < 3 mở 367 < 4 bị chặn 1 158 < 4 mở 2 279) và heatmap điểm một quân theo vị trí.
 
 ### Hạn chế kỹ thuật đã biết

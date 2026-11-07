@@ -1,8 +1,8 @@
 """Minimax và Alpha-Beta cho cờ Caro 11×11.
 
-Giai đoạn 1 — Trạng thái tìm kiếm và hàm lượng giá (file hiện tại).
-Giai đoạn 2 — Minimax giới hạn độ sâu, cắt tỉa Alpha-Beta, Iterative Deepening.
-Giai đoạn 3 — Đối chứng cắt tỉa và khảo sát độ sâu.
+Giai đoạn 1 - Trạng thái tìm kiếm và hàm lượng giá (file hiện tại).
+Giai đoạn 2 - Minimax giới hạn độ sâu, cắt tỉa Alpha-Beta, Iterative Deepening.
+Giai đoạn 3 - Đối chứng cắt tỉa và khảo sát độ sâu.
 
 Quy ước góc nhìn: mọi hàm lượng giá nhận tham số `perspective` (1 hoặc -1) và
 trả điểm theo góc nhìn bên đó: dương là có lợi, âm là bất lợi, 0 là cân bằng.
@@ -34,7 +34,7 @@ WINDOW_WEIGHTS: tuple[int, ...] = (0, 1, 10, 100, 1_000, 0)
 WIN_SCORE = 10_000_000
 
 
-# Cửa sổ 5 ô — nền tảng cho cả phát hiện thắng và hàm lượng giá
+# Cửa sổ 5 ô - nền tảng cho cả phát hiện thắng và hàm lượng giá
 
 @lru_cache(maxsize=None)
 def _window_indices(size: int, win_length: int) -> np.ndarray:
@@ -130,7 +130,7 @@ class SearchState:
 
     @classmethod
     def initial(cls, board_size: int = BOARD_SIZE, win_length: int = WIN_LENGTH) -> "SearchState":
-        """Bàn trống, X đi trước — giống CaroGame() mới khởi tạo."""
+        """Bàn trống, X đi trước - giống CaroGame() mới khởi tạo."""
         return cls(np.zeros((board_size, board_size), dtype=np.int8), 1, win_length=win_length)
 
     @property

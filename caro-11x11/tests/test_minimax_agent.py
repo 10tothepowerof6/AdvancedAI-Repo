@@ -1,4 +1,4 @@
-"""Kiểm thử Minimax — Giai đoạn 1: trạng thái tìm kiếm và hàm lượng giá.
+"""Kiểm thử Minimax - Giai đoạn 1: trạng thái tìm kiếm và hàm lượng giá.
 
 Mỗi ca theo 3 bước Arrange / Act / Assert. Fixture được dựng bằng chuỗi nước
 đi hợp lệ qua CaroGame.step() để bảo đảm trạng thái có thể xảy ra trong ván thật.
@@ -102,7 +102,7 @@ def _random_board(seed, n_moves):
     return game
 
 
-# Trạng thái tìm kiếm — đối chiếu với engine
+# Trạng thái tìm kiếm - đối chiếu với engine
 
 @pytest.mark.parametrize("name", FIXTURES)
 def test_fixture_sequence_matches_engine_every_step(name):
@@ -248,7 +248,7 @@ def test_window_counts_single_stone(cell, expected):
 
 
 def test_window_counts_blocked_window_is_dead():
-    # Arrange: X X X O trên cùng hàng — cửa sổ chứa cả hai màu không tính cho ai
+    # Arrange: X X X O trên cùng hàng - cửa sổ chứa cả hai màu không tính cho ai
     board = np.zeros((11, 11), dtype=np.int8)
     board[5, 2:5], board[5, 5] = X, O
     # Act
