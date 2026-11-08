@@ -581,6 +581,63 @@ def test_time_mode_fallback_when_no_simulation_completes(monkeypatch):
     assert action in candidate_actions(board, DEFAULT_RADIUS)  # nước dự phòng hợp lệ
 
 
+class _FakeClock:
+    """Đồng hồ giả: mỗi lần đọc tăng 1 ms, không phụ thuộc tốc độ máy."""
+
+    def __init__(self, start=100.0, step=0.001):
+        self.now, self.step = start, step
+
+    def __call__(self):
+        self.now += self.step
+        return self.now
+
+
+def _run_with_guard(func, timeout_s=10.0):
+    # Chạy trong luồng riêng: nếu vòng tìm kiếm lặp vô hạn thì test báo lỗi thay vì treo.
+    import threading
+    outcome = {}
+
+    def target():
+        try:
+            outcome["value"] = func()
+        except Exception as error:  # chuyển lỗi về luồng chính để kiểm chứng
+            outcome["error"] = error
+
+    worker = threading.Thread(target=target, daemon=True)
+    worker.start()
+    worker.join(timeout_s)
+    assert not worker.is_alive(), "search() không dừng: vòng tìm kiếm chạy vô hạn"
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
+@pytest.mark.parametrize("stale_deadline", [None, 0.0], ids=["deadline_None", "deadline_cu_da_qua"])
+def test_direct_search_in_time_mode_sets_its_own_deadline(monkeypatch, stale_deadline):
+    # Chuẩn bị: đồng hồ giả; agent chế độ time chưa từng qua choose_action (deadline None)
+    # hoặc còn giữ deadline cũ đã qua của lượt trước.
+    clock = _FakeClock()
+    monkeypatch.setattr("agents.mcts_agent.perf_counter", clock)
+    agent = MCTSAgent(seed=0, budget=SearchBudget(mode="time", time_limit_s=0.5))
+    agent.deadline = stale_deadline
+    start = clock.now
+    # Thực thi: gọi search() trực tiếp.
+    root, fallback = _run_with_guard(lambda: agent.search(_small_board(), 1))
+    # Kiểm chứng: dừng được, theo mốc của chính lần gọi (start + 0,5 − 0,1 = start + 0,4 theo đồng hồ giả),
+    # có mô phỏng hoàn thành và chỉ đếm mô phỏng hoàn thành.
+    assert agent.stats["simulations"] > 0
+    assert root.visits == agent.stats["simulations"]
+    assert start + 0.4 <= clock.now < start + 0.5
+    assert fallback in candidate_actions(_small_board(), DEFAULT_RADIUS)
+
+
+def test_internal_search_without_deadline_in_time_mode_raises():
+    # Đường nội bộ dùng deadline của choose_action; thiếu deadline phải báo lỗi rõ, không lặp vô hạn.
+    agent = MCTSAgent(seed=0, budget=SearchBudget(mode="time"))
+    with pytest.raises(ValueError, match="deadline"):
+        _run_with_guard(lambda: agent._search(_small_board(), 1, None, None))
+
+
 def test_trace_replays_four_steps_on_engine():
     # Mỗi mô phỏng: đường lựa chọn + nước mở rộng + các nước rollout, phát lại trên engine
     # từ thế gốc phải cho đúng kết quả đã lan truyền ngược.

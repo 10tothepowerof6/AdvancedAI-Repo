@@ -374,7 +374,8 @@ class MCTSAgent(BaseAgent):
     - Ngân sách đọc từ `self.budget` tại mỗi lượt (runner gán lại budget sau khi tạo agent).
       `fixed`: chạy đúng `budget.simulations` mô phỏng hoàn thành.
       `time`: chạy tới `deadline − biên`, biên = min(time_margin_s, 0,5 × time_limit_s);
-      không dùng `simulations` làm điều kiện dừng phụ.
+      không dùng `simulations` làm điều kiện dừng phụ. Deadline lấy từ choose_action; khi gọi
+      search() trực tiếp thì search() tự đặt deadline cho lần gọi đó, nên vòng lặp luôn có điểm dừng.
     - Luôn có nước dự phòng (một ứng viên chọn ngẫu nhiên theo seed) phòng khi chưa hoàn thành
       mô phỏng nào trước mốc dừng.
     - Cây được dựng mới ở mỗi lượt (không tái sử dụng giữa các nước).
@@ -400,26 +401,42 @@ class MCTSAgent(BaseAgent):
         self.rng = np.random.default_rng(seed)
         self.last_root: MCTSNode | None = None
 
-    def _stop_at(self) -> float | None:
-        """Mốc dừng hợp tác ở chế độ time; None ở chế độ fixed hoặc khi gọi ngoài choose_action."""
-        if self.budget.mode != "time" or self.deadline is None:
+    def _stop_at(self, deadline: float | None) -> float | None:
+        """Mốc dừng hợp tác của một lượt: None ở chế độ fixed; ở chế độ time bắt buộc có deadline.
+
+        Chế độ time không có điều kiện dừng nào khác ngoài mốc này, nên thiếu deadline là lỗi
+        (báo ngay thay vì để vòng tìm kiếm chạy vô hạn).
+        """
+        if self.budget.mode != "time":
             return None
-        return self.deadline - min(self.time_margin_s, 0.5 * self.budget.time_limit_s)
+        if deadline is None:
+            raise ValueError("Chế độ time cần deadline cho lượt hiện tại")
+        return deadline - min(self.time_margin_s, 0.5 * self.budget.time_limit_s)
 
     def search(self, board: np.ndarray, player: int,
                trace: Callable[[dict[str, object]], None] | None = None) -> tuple[MCTSNode, Action]:
-        """Chạy tìm kiếm, trả (gốc cây, nước dự phòng); cập nhật `stats` và `last_root`.
+        """Gọi trực tiếp (ngoài choose_action, ví dụ từ notebook): trả (gốc cây, nước dự phòng).
 
+        Ở chế độ time, lần gọi này tự đặt deadline riêng = thời điểm gọi + time_limit_s,
+        không dùng `self.deadline` (có thể là None hoặc mốc cũ của lượt trước).
         `trace` (nếu có) được gọi sau mỗi mô phỏng hoàn thành với dict mô tả bốn bước;
         notebook dùng nó để quan sát, không ảnh hưởng thuật toán.
         """
         if not isinstance(self.budget, SearchBudget):
             raise ValueError("Ngân sách phải là SearchBudget")
+        deadline = perf_counter() + self.budget.time_limit_s if self.budget.mode == "time" else None
+        return self._search(board, player, deadline, trace)
+
+    def _search(self, board: np.ndarray, player: int, deadline: float | None,
+                trace: Callable[[dict[str, object]], None] | None) -> tuple[MCTSNode, Action]:
+        """Vòng tìm kiếm của một lượt với deadline đã xác định; cập nhật `stats` và `last_root`."""
+        if not isinstance(self.budget, SearchBudget):
+            raise ValueError("Ngân sách phải là SearchBudget")
+        stop_at = self._stop_at(deadline)
         root = MCTSNode.root(board, player, radius=self.radius)
         if root.is_terminal():
             raise ValueError("Không tìm nước đi cho trạng thái đã kết thúc")
         fallback = root.untried_actions[int(self.rng.integers(len(root.untried_actions)))]
-        stop_at = self._stop_at()
         fixed = self.budget.mode == "fixed"
         completed = created = 0
         while not fixed or completed < self.budget.simulations:
@@ -454,6 +471,7 @@ class MCTSAgent(BaseAgent):
         return root, fallback
 
     def get_action(self, board: np.ndarray, player: int) -> Action:
-        root, fallback = self.search(board, player)
+        # choose_action của BaseAgent đã đặt self.deadline cho lượt này (None ở chế độ fixed).
+        root, fallback = self._search(board, player, self.deadline, None)
         action = best_action(root, self.rng)
         return fallback if action is None else action
