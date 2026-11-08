@@ -1,6 +1,6 @@
 """Minimax và Alpha-Beta cho cờ Caro 11×11.
 
-Giai đoạn 1 — Trạng thái tìm kiếm và hàm lượng giá (file hiện tại).
+Giai đoạn 1 — Trạng thái tìm kiếm và hàm lượng giá.
 Giai đoạn 2 — Minimax giới hạn độ sâu, cắt tỉa Alpha-Beta, Iterative Deepening.
 Giai đoạn 3 — Đối chứng cắt tỉa và khảo sát độ sâu.
 
@@ -11,8 +11,10 @@ trả điểm theo góc nhìn bên đó: dương là có lợi, âm là bất l�
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from functools import lru_cache
 from numbers import Integral
+from typing import Callable
 
 import numpy as np
 
@@ -286,9 +288,19 @@ def heuristic_score(board: np.ndarray, perspective: int, *,
     if weights is None:
         weights = default_weights(win_length, size)
     weight_array = _validate_weights(weights, win_length, size)
-    counts = window_counts(board, win_length)
-    score = int(weight_array @ counts[1]) - int(weight_array @ counts[-1])
-    return perspective * score
+    return perspective * _raw_heuristic(board, weight_array, win_length)
+
+
+def _raw_heuristic(board: np.ndarray, weight_array: np.ndarray, win_length: int) -> int:
+    """Lõi heuristic theo góc nhìn X, không kiểm tra đầu vào (dùng trong vòng tìm kiếm).
+
+    Cho cùng kết quả với tổng trọng số trên window_counts: cửa sổ không có quân O
+    cộng W[số quân X], cửa sổ không có quân X trừ W[số quân O].
+    """
+    cells = board.ravel()[_window_indices(board.shape[0], win_length)]
+    x_count = np.count_nonzero(cells == 1, axis=1)
+    o_count = np.count_nonzero(cells == -1, axis=1)
+    return int(weight_array[x_count[o_count == 0]].sum() - weight_array[o_count[x_count == 0]].sum())
 
 
 def evaluate(state: SearchState, perspective: int, *,
@@ -301,3 +313,163 @@ def evaluate(state: SearchState, perspective: int, *,
     if state.is_terminal():
         return terminal_score(state.result(), perspective)
     return heuristic_score(state.board, perspective, win_length=state.win_length, weights=weights)
+
+
+# Thuật toán Minimax và cắt tỉa Alpha-Beta
+
+# Giá trị vô cực dạng số nguyên, lớn hơn mọi điểm terminal.
+_INF = WIN_SCORE * 10
+
+
+class SearchTimeout(Exception):
+    """Hết thời gian giữa chừng; kết quả của độ sâu đang dở bị bỏ."""
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    """Kết quả một lần tìm kiếm với độ sâu cố định.
+
+    value theo góc nhìn bên đi ở nút gốc. nodes_visited đếm số nút đã duyệt
+    (tính cả nút gốc), pruned_nodes đếm số lần cắt tỉa thực sự bỏ qua được
+    ít nhất một nước con (không phải số nút con bị bỏ qua).
+    """
+    value: int
+    action: Action | None
+    depth: int
+    nodes_visited: int
+    pruned_nodes: int
+
+
+def _validate_positive_int(value: int, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral) or value < 1:
+        raise ValueError(f"{name} phải là số nguyên dương")
+    return int(value)
+
+
+class MinimaxSearcher:
+    """Minimax giới hạn độ sâu; một ply là một nước đi của một bên.
+
+    - Nút gốc là Max (bên đến lượt ở gốc); nút có người đến lượt khác gốc là Min.
+    - Điểm luôn tính theo góc nhìn bên ở gốc. Nút terminal không mở rộng thêm;
+      thắng được trừ đi số ply để ưu tiên thắng sớm, thua được cộng số ply để
+      ưu tiên thua muộn. Nút lá không terminal dùng heuristic_score.
+    - use_alpha_beta chỉ bật/tắt cắt tỉa; trạng thái, lượng giá, tập ứng viên
+      và thứ tự xét nước giữ nguyên để hai chế độ so sánh được với nhau.
+    - Phá hòa: khi nhiều nước đồng điểm, giữ nước gặp đầu tiên theo thứ tự xét.
+    - move_ordering sắp xếp nước con theo heuristic của bên đi (tốt trước),
+      chỉ áp dụng ở nút còn ít nhất 2 ply; sort ổn định nên vẫn tất định.
+    - weights=None dùng default_weights theo luật thắng và cỡ bàn của trạng thái.
+      Trọng số được kiểm tra theo luật của trạng thái khi tìm kiếm: cận heuristic
+      phải nhỏ hơn WIN_SCORE - số ô của bàn, vì điểm thắng bị trừ tối đa ngần ấy ply.
+    """
+
+    def __init__(self, *, use_alpha_beta: bool = True, move_ordering: bool = True,
+                 radius: int = 2, weights: tuple[int, ...] | None = None,
+                 should_stop: Callable[[], bool] | None = None):
+        if not isinstance(use_alpha_beta, bool) or not isinstance(move_ordering, bool):
+            raise ValueError("use_alpha_beta và move_ordering phải là bool")
+        self.use_alpha_beta = use_alpha_beta
+        self.move_ordering = move_ordering
+        self.radius = _validate_positive_int(radius, "Bán kính ứng viên")
+        self.weights = None if weights is None else tuple(weights)
+        self._weight_cache: dict[tuple[int, int], np.ndarray] = {}
+        self.should_stop = should_stop
+        self.nodes_visited = 0
+        self.pruned_nodes = 0
+
+    def weights_for(self, state: SearchState) -> np.ndarray:
+        """Mảng trọng số đã kiểm tra cho luật thắng và cỡ bàn của state (có cache)."""
+        key = (state.size, state.win_length)
+        if key not in self._weight_cache:
+            weights = self.weights if self.weights is not None else default_weights(state.win_length, state.size)
+            array = _validate_weights(weights, state.win_length, state.size)
+            bound = len(_window_indices(*key)) * int(array.max())
+            if bound >= WIN_SCORE - state.board.size:
+                raise ValueError(f"Cận heuristic {bound} phải nhỏ hơn WIN_SCORE - {state.board.size} "
+                                 "để thắng ở ply sâu nhất vẫn cao điểm hơn mọi thế đang chơi")
+            self._weight_cache[key] = array
+        return self._weight_cache[key]
+
+    def _evaluate(self, state: SearchState, perspective: int) -> int:
+        """Như evaluate() nhưng bỏ kiểm tra đầu vào; trạng thái do chính SearchState sinh ra."""
+        if state.is_terminal():
+            return terminal_score(state.result(), perspective)
+        return perspective * _raw_heuristic(state.board, self.weights_for(state), state.win_length)
+
+    def ordered_moves(self, state: SearchState, depth_left: int,
+                      first_action: Action | None = None
+                      ) -> list[tuple[Action, SearchState | None]]:
+        """Danh sách (nước đi, trạng thái con hoặc None) theo đúng thứ tự sẽ được xét.
+
+        Không sắp xếp: thứ tự hàng/cột của candidate_actions, trạng thái con được
+        tạo khi cần (None) để nhánh bị cắt tỉa không tốn công sinh. Có sắp xếp:
+        phải sinh mọi con để lượng giá, nên trả kèm trạng thái con để dùng lại.
+        """
+        actions = state.candidates(self.radius)
+        if self.move_ordering and depth_left >= 2:
+            mover = state.current_player
+            moves = [(action, state.apply(action)) for action in actions]
+            moves.sort(key=lambda item: -self._evaluate(item[1], mover))
+        else:
+            moves = [(action, None) for action in actions]
+        if first_action is not None:
+            for index, (action, _) in enumerate(moves):
+                if action == first_action:
+                    moves.insert(0, moves.pop(index))
+                    break
+        return moves
+
+    def search(self, state: SearchState, depth: int, *,
+               first_action: Action | None = None) -> SearchResult:
+        """Tìm nước tốt nhất cho state.current_player với độ sâu depth ply.
+
+        first_action (nếu có) được xét đầu tiên ở nút gốc; Iterative Deepening
+        dùng nó để đưa nước tốt nhất của độ sâu trước lên đầu.
+        """
+        depth = _validate_positive_int(depth, "Độ sâu")
+        if state.is_terminal():
+            raise ValueError("Không tìm kiếm từ trạng thái đã kết thúc")
+        self.weights_for(state)  # báo lỗi trọng số trước khi bắt đầu duyệt
+        self.nodes_visited, self.pruned_nodes = 1, 0
+        root = state.current_player
+        best_value, best_action = -_INF, None
+        alpha = -_INF
+        for action, child in self.ordered_moves(state, depth, first_action):
+            child = child if child is not None else state.apply(action)
+            value = self._minimax(child, depth - 1, 1, alpha, _INF, root)
+            if value > best_value:
+                best_value, best_action = value, action
+            if self.use_alpha_beta:
+                alpha = max(alpha, best_value)
+        return SearchResult(best_value, best_action, depth, self.nodes_visited, self.pruned_nodes)
+
+    def _minimax(self, state: SearchState, depth: int, ply: int,
+                 alpha: int, beta: int, root: int) -> int:
+        self.nodes_visited += 1
+        if self.should_stop is not None and self.should_stop():
+            raise SearchTimeout
+        if state.is_terminal():
+            score = terminal_score(state.result(), root)
+            return score - ply if score > 0 else score + ply if score < 0 else 0
+        if depth == 0:
+            return self._evaluate(state, root)
+
+        children = self.ordered_moves(state, depth)
+        maximizing = state.current_player == root
+        best = -_INF if maximizing else _INF
+        for index, (action, child) in enumerate(children):
+            child = child if child is not None else state.apply(action)
+            value = self._minimax(child, depth - 1, ply + 1, alpha, beta, root)
+            if maximizing:
+                best = max(best, value)
+                if self.use_alpha_beta:
+                    alpha = max(alpha, best)
+            else:
+                best = min(best, value)
+                if self.use_alpha_beta:
+                    beta = min(beta, best)
+            if self.use_alpha_beta and alpha >= beta:
+                if index < len(children) - 1:
+                    self.pruned_nodes += 1
+                break
+        return best
