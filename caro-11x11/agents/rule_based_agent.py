@@ -86,6 +86,110 @@ def find_winning_actions(
     return winning
 
 
+def count_winning_threats(
+    board: np.ndarray,
+    row: int,
+    col: int,
+    player: int,
+    win_length: int = WIN_LENGTH,
+) -> int:
+    """Đếm số ô trống trở thành nước thắng ngay nếu player đặt quân vào (row, col).
+
+    Chỉ xét khi (row, col) đang trống và bản thân nước (row, col) chưa phải
+    nước thắng ngay. Quét dọc theo 4 đường thẳng đi qua (row, col) trong
+    bán kính < win_length trên bản sao cục bộ để không sửa mảng board gốc.
+    """
+    if board[row, col] != EMPTY:
+        return 0
+    if is_winning_move(board, row, col, player, win_length):
+        return 0
+
+    board_after = board.copy()
+    board_after[row, col] = player
+    board_size = board.shape[0]
+    threat_cells: set[Action] = set()
+
+    for dr, dc in DIRECTIONS:
+        for sign in (-1, 1):
+            for step in range(1, win_length):
+                nr = row + sign * step * dr
+                nc = col + sign * step * dc
+                if not (0 <= nr < board_size and 0 <= nc < board_size):
+                    break
+                if (
+                    board_after[nr, nc] == EMPTY
+                    and is_winning_move(board_after, nr, nc, player, win_length)
+                    and not is_winning_move(board, nr, nc, player, win_length)
+                ):
+                    threat_cells.add((nr, nc))
+
+    return int(len(threat_cells))
+
+
+def creates_open_four(
+    board: np.ndarray,
+    row: int,
+    col: int,
+    player: int,
+    win_length: int = WIN_LENGTH,
+) -> bool:
+    """Kiểm tra đặt quân vào (row, col) có tạo từ 2 nước thắng độc lập trở lên (open four)."""
+    return bool(count_winning_threats(board, row, col, player, win_length) >= 2)
+
+
+def creates_broken_four(
+    board: np.ndarray,
+    row: int,
+    col: int,
+    player: int,
+    win_length: int = WIN_LENGTH,
+) -> bool:
+    """Kiểm tra đặt quân vào (row, col) có tạo đúng 1 nước thắng ngay ở lượt kế tiếp."""
+    return bool(count_winning_threats(board, row, col, player, win_length) == 1)
+
+
+def creates_open_three(
+    board: np.ndarray,
+    row: int,
+    col: int,
+    player: int,
+    win_length: int = WIN_LENGTH,
+) -> bool:
+    """Kiểm tra đặt quân vào (row, col) có tạo ba quân mở (open three) hay không.
+
+    Điều kiện:
+      - Ô (row, col) đang trống, chưa thắng ngay và chưa tạo đe dọa thắng ngay
+        (count_winning_threats == 0).
+      - Sau khi đặt quân vào (row, col), tồn tại ít nhất 1 ô trống lân cận trên
+        cùng đường thẳng mà ở lượt kế tiếp player có thể đánh vào đó để tạo open four.
+    """
+    if board[row, col] != EMPTY:
+        return False
+    if is_winning_move(board, row, col, player, win_length):
+        return False
+    if count_winning_threats(board, row, col, player, win_length) != 0:
+        return False
+
+    board_after = board.copy()
+    board_after[row, col] = player
+    board_size = board.shape[0]
+
+    for dr, dc in DIRECTIONS:
+        for sign in (-1, 1):
+            for step in range(1, win_length):
+                nr = row + sign * step * dr
+                nc = col + sign * step * dc
+                if not (0 <= nr < board_size and 0 <= nc < board_size):
+                    break
+                if board_after[nr, nc] == EMPTY:
+                    if creates_open_four(
+                        board_after, nr, nc, player, win_length
+                    ) and not creates_open_four(board, nr, nc, player, win_length):
+                        return True
+
+    return False
+
+
 def positional_score(
     board: np.ndarray,
     row: int,
@@ -129,17 +233,27 @@ def positional_score(
 # ---------------------------------------------------------------------------
 
 class RuleBasedAgent(BaseAgent):
-    """Tác tử dựa trên tập luật chiến thuật cho cờ Caro 11×11.
+    """Tác tử dựa trên tập luật chiến thuật và nhận diện mẫu hình cho cờ Caro 11×11.
 
     Thứ tự ưu tiên quyết định nước đi:
-      1. win_now      — Thắng ngay lập tức nếu có thể.
-      2. block_urgent — Chặn đối thủ thắng ngay ở lượt sau.
-      3. positional_fallback — Chọn vị trí tốt nhất từ tập ứng viên.
+      - Khi use_patterns=False (Giai đoạn 1 — 3 tầng):
+        1. win_now             — Thắng ngay lập tức nếu có thể.
+        2. block_urgent        — Chặn đối thủ thắng ngay ở lượt sau.
+        3. positional_fallback — Chọn vị trí tốt nhất từ tập ứng viên.
+      - Khi use_patterns=True (Giai đoạn 2 — 8 tầng):
+        1. win_now             — Thắng ngay lập tức (toàn bàn).
+        2. block_urgent        — Chặn đối thủ thắng ngay ở lượt sau (toàn bàn).
+        3. attack_open_four    — Tạo 4 mở (>= 2 mối đe dọa thắng ngay trên tập ứng viên).
+        4. block_open_four     — Chặn đối thủ tạo 4 mở (trên tập ứng viên).
+        5. attack_broken_four  — Tạo 4 gãy/nửa mở (đúng 1 mối đe dọa thắng ngay).
+        6. attack_open_three   — Tạo 3 mở (bàn đạp tạo 4 mở ở lượt kế).
+        7. block_open_three    — Chặn đối thủ tạo 3 mở (trên tập ứng viên).
+        8. positional_fallback — Chọn vị trí tốt nhất từ tập ứng viên.
 
     Tham số:
       name             : Tên hiển thị của tác tử.
       budget           : Ngân sách tìm kiếm (SearchBudget).
-      candidate_radius : Bán kính tập ứng viên cho fallback (mặc định 2).
+      candidate_radius : Bán kính tập ứng viên cho pattern/fallback (mặc định 2).
       use_patterns     : Bật nhận diện pattern nâng cao (Giai đoạn 2).
       seed             : Seed cho tie-breaking ngẫu nhiên; None = tất định.
     """
@@ -231,7 +345,10 @@ class RuleBasedAgent(BaseAgent):
         """Trả về bản sao thông tin truy vết của nước đi gần nhất.
 
         Các trường:
-          rule_triggered  : "win_now" | "block_urgent" | "positional_fallback"
+          rule_triggered  : "win_now" | "block_urgent" | "attack_open_four" |
+                            "block_open_four" | "attack_broken_four" |
+                            "attack_open_three" | "block_open_three" |
+                            "positional_fallback"
           selected_action : (row, col) đã chọn
           candidate_count : số ứng viên được xét ở tầng này
           matching_actions: danh sách các nước cùng tầng (đã tìm được)
@@ -298,9 +415,7 @@ class RuleBasedAgent(BaseAgent):
             }
             return best
 
-        # ----------------------------------------------------------------
-        # TẦNG 3: Dự phòng vị trí (positional_fallback)
-        # ----------------------------------------------------------------
+        # Tập ứng viên lân cận cho các tầng pattern và fallback
         candidates = candidate_actions(board, radius=self.candidate_radius)
 
         # Nếu candidate_actions trả về rỗng (bàn đầy) → fallback toàn bàn
@@ -308,6 +423,67 @@ class RuleBasedAgent(BaseAgent):
         if not candidates:
             candidates = empty_cells
 
+        # ----------------------------------------------------------------
+        # TẦNG 3–7 (khi use_patterns=True): Nhận diện pattern theo ưu tiên
+        # ----------------------------------------------------------------
+        if self.use_patterns:
+            pattern_tiers = (
+                (
+                    "attack_open_four",
+                    creates_open_four,
+                    player,
+                    "Tấn công bốn quân mở (open four)",
+                ),
+                (
+                    "block_open_four",
+                    creates_open_four,
+                    opponent,
+                    "Chặn đối thủ tạo bốn quân mở (open four)",
+                ),
+                (
+                    "attack_broken_four",
+                    creates_broken_four,
+                    player,
+                    "Tấn công bốn quân bị chặn/ngắt quãng (broken four)",
+                ),
+                (
+                    "attack_open_three",
+                    creates_open_three,
+                    player,
+                    "Tấn công ba quân mở (open three)",
+                ),
+                (
+                    "block_open_three",
+                    creates_open_three,
+                    opponent,
+                    "Chặn đối thủ tạo ba quân mở (open three)",
+                ),
+            )
+            for rule_label, check_fn, target_player, desc_vi in pattern_tiers:
+                self.stats["nodes_visited"] += len(candidates)
+                matching_actions = [
+                    (r, c)
+                    for r, c in candidates
+                    if check_fn(board, r, c, target_player)
+                ]
+                if matching_actions:
+                    best = self._choose_best(matching_actions, board, player)
+                    self.last_decision_info = {
+                        "rule_triggered": rule_label,
+                        "selected_action": best,
+                        "candidate_count": len(candidates),
+                        "matching_actions": list(matching_actions),
+                        "reason": (
+                            f"{desc_vi} tại {best} — tìm thấy "
+                            f"{len(matching_actions)} nước phù hợp trong "
+                            f"{len(candidates)} ứng viên, chọn theo tie-breaking."
+                        ),
+                    }
+                    return best
+
+        # ----------------------------------------------------------------
+        # TẦNG CUỐI: Dự phòng vị trí (positional_fallback)
+        # ----------------------------------------------------------------
         # nodes_visited: đếm thêm số ứng viên được xét
         self.stats["nodes_visited"] += len(candidates)
 

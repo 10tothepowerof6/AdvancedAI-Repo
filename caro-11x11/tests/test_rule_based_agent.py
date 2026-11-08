@@ -12,6 +12,7 @@ Không sửa các file ngoài phạm vi: core/, config/, agents/base_agent.py, a
 import numpy as np
 import pytest
 
+import agents.rule_based_agent as rule_based_module
 from agents.random_agent import RandomAgent
 from agents.rule_based_agent import (
     RuleBasedAgent,
@@ -819,3 +820,672 @@ class TestTieBreaking:
 
         # Assert
         assert actions1 == actions2, "Hai agent cùng seed phải cho kết quả giống nhau"
+
+
+
+# ===========================================================================
+# GIAI ĐOẠN 2 — Nhận diện pattern và thứ tự ưu tiên (PHA RED của TDD)
+# ===========================================================================
+# Hợp đồng API Giai đoạn 2 trong agents/rule_based_agent.py (chưa cài đặt ở pha RED):
+#   count_winning_threats(board, row, col, player, win_length=5) -> int
+#   creates_open_four(board, row, col, player, win_length=5)     -> bool
+#   creates_broken_four(board, row, col, player, win_length=5)   -> bool
+#   creates_open_three(board, row, col, player, win_length=5)    -> bool
+#
+# Thứ tự ưu tiên khi use_patterns=True (cao -> thấp):
+#   win_now > block_urgent > attack_open_four > block_open_four
+#   > attack_broken_four > attack_open_three > block_open_three > positional_fallback
+#
+# Các hàm pattern được truy cập qua getattr để khi chưa cài đặt, test báo FAILED
+# với thông điệp rõ ràng (không làm hỏng việc thu thập 48 test Giai đoạn 1).
+# ===========================================================================
+
+# Bảng hướng: tên -> (vector hướng, ô gốc). Mỗi đường có đủ chỗ cho ô k = -1..4
+# nên khi đặt quân tại k = 3 sẽ tạo chuỗi 4 hở cả hai đầu (k = -1 và k = 4).
+_LINE_ORIGINS: dict[str, tuple[tuple[int, int], tuple[int, int]]] = {
+    "ngang": ((0, 1), (5, 3)),
+    "doc": ((1, 0), (3, 5)),
+    "cheo_chinh": ((1, 1), (3, 3)),
+    "cheo_phu": ((1, -1), (3, 7)),
+}
+
+# Ô đệm đặt ở góc/biên xa vùng thử nghiệm, dùng để cân bằng số quân theo lượt đi.
+_FILLER_CELLS: list[tuple[int, int]] = [
+    (0, 0), (0, 10), (10, 0), (10, 10), (0, 5), (10, 5),
+]
+
+# Bộ thế cờ theo nhãn luật: nhãn -> (quân của bên đến lượt, quân của đối thủ).
+# Mọi thế đều dựng qua CaroGame.step() với số quân hợp lệ nhờ _build_turn_board.
+_PATTERN_SCENARIOS: dict[str, tuple[list[tuple[int, int]], list[tuple[int, int]]]] = {
+    # Bên đi có 3 quân hở hai đầu -> đánh thêm 1 quân tạo open four.
+    "attack_open_four": ([(8, 3), (8, 4), (8, 5)], []),
+    # Đối thủ có 3 quân hở -> phải chặn trước khi đối thủ tạo open four.
+    "block_open_four": ([(8, 3), (8, 4)], [(2, 3), (2, 4), (2, 5)]),
+    # Bên đi có 3 quân bị đối thủ chặn 1 đầu (8,2) -> chỉ tạo được broken four.
+    "attack_broken_four": ([(8, 3), (8, 4), (8, 5), (2, 3), (2, 4)], [(8, 2)]),
+    # Hai bên chỉ có 2 quân -> bên đi tự tạo open three.
+    "attack_open_three": ([(8, 3), (8, 4)], [(2, 3), (2, 4)]),
+    # Bên đi không có quân liên kết, đối thủ có 2 quân -> chặn open three.
+    "block_open_three": ([], [(2, 3), (2, 4)]),
+}
+
+
+def _pattern_api(name: str):
+    """Lấy hàm pattern Giai đoạn 2; báo FAILED rõ ràng nếu chưa được cài đặt (pha RED)."""
+    func = getattr(rule_based_module, name, None)
+    if func is None:
+        pytest.fail(
+            f"[RED] Chưa cài đặt `{name}(board, row, col, player, win_length=5)` "
+            "trong agents/rule_based_agent.py (Giai đoạn 2).",
+            pytrace=False,
+        )
+    return func
+
+
+def _board_with_stones(
+    player: int,
+    own_stones: list[tuple[int, int]],
+    opponent_stones: list[tuple[int, int]] = (),
+) -> np.ndarray:
+    """Dựng nhanh bàn cờ numpy: quân của `player` và (tùy chọn) quân đối thủ."""
+    if player == PLAYER_X:
+        return _board_from_stones(list(own_stones), list(opponent_stones))
+    return _board_from_stones(list(opponent_stones), list(own_stones))
+
+
+def _line_cells(
+    origin: tuple[int, int], direction: tuple[int, int], steps: tuple[int, ...]
+) -> list[tuple[int, int]]:
+    """Trả về các ô origin + k * direction cho từng k trong steps."""
+    return [
+        (origin[0] + k * direction[0], origin[1] + k * direction[1]) for k in steps
+    ]
+
+
+def _build_turn_board(
+    mover: int,
+    mover_stones: list[tuple[int, int]],
+    opponent_stones: list[tuple[int, int]],
+) -> np.ndarray:
+    """Dựng bàn cờ hợp lệ qua `_build_board` (CaroGame.step()) để đến lượt `mover`.
+
+    Điều kiện số quân: |X| = |O| khi đến lượt X; |X| = |O| + 1 khi đến lượt O.
+    Bên thiếu quân được bù bằng ô đệm ở góc/biên (không nằm trong vùng thử nghiệm).
+    """
+    if mover == PLAYER_X:
+        x_stones, o_stones = list(mover_stones), list(opponent_stones)
+    else:
+        x_stones, o_stones = list(opponent_stones), list(mover_stones)
+    wanted_gap = 0 if mover == PLAYER_X else 1
+    used = set(x_stones) | set(o_stones)
+    fillers = [cell for cell in _FILLER_CELLS if cell not in used]
+    while len(x_stones) - len(o_stones) < wanted_gap:
+        x_stones.append(fillers.pop(0))
+    while len(x_stones) - len(o_stones) > wanted_gap:
+        o_stones.append(fillers.pop(0))
+    return _build_board(x_stones, o_stones)
+
+
+def _scenario_board(label: str, mover: int) -> np.ndarray:
+    """Dựng thế cờ của nhãn luật `label` cho bên `mover` đến lượt."""
+    mover_stones, opponent_stones = _PATTERN_SCENARIOS[label]
+    return _build_turn_board(mover, mover_stones, opponent_stones)
+
+
+def _action_satisfies_label(
+    board: np.ndarray, action: tuple[int, int], mover: int, label: str
+) -> bool:
+    """Kiểm tra nước `action` đúng bản chất của nhãn luật (dựa trên hàm pattern)."""
+    row, col = action
+    if label == "attack_open_four":
+        return _pattern_api("creates_open_four")(board, row, col, mover)
+    if label == "block_open_four":
+        return _pattern_api("creates_open_four")(board, row, col, -mover)
+    if label == "attack_broken_four":
+        return _pattern_api("creates_broken_four")(board, row, col, mover)
+    if label == "attack_open_three":
+        return _pattern_api("creates_open_three")(board, row, col, mover)
+    if label == "block_open_three":
+        return _pattern_api("creates_open_three")(board, row, col, -mover)
+    raise AssertionError(f"Nhãn luật không hỗ trợ: {label}")
+
+
+# ===========================================================================
+# PHẦN 7 — Nhận diện pattern (hàm cấp thấp)
+# ===========================================================================
+
+class TestPatternRecognition:
+    """Kiểm tra độc lập các hàm nhận diện pattern, kể cả ca âm tính và bất biến board."""
+
+    @pytest.mark.parametrize("player", [PLAYER_X, PLAYER_O])
+    @pytest.mark.parametrize("direction_name", list(_LINE_ORIGINS))
+    def test_creates_open_four_bon_huong_hai_phia(self, direction_name, player):
+        """Đặt quân thứ 4 vào chuỗi 3 hở hai đầu tạo open four (2 ô thắng độc lập)."""
+        # Arrange: ba quân tại k = 0, 1, 2; nước thử tại k = 3; hai đầu k = -1 và k = 4 trống
+        direction, origin = _LINE_ORIGINS[direction_name]
+        board = _board_with_stones(player, _line_cells(origin, direction, (0, 1, 2)))
+        row, col = _line_cells(origin, direction, (3,))[0]
+
+        # Act
+        is_open_four = _pattern_api("creates_open_four")(board, row, col, player)
+        is_broken_four = _pattern_api("creates_broken_four")(board, row, col, player)
+        threats = _pattern_api("count_winning_threats")(board, row, col, player)
+
+        # Assert
+        assert is_open_four, f"Hướng {direction_name}: phải là open four"
+        assert not is_broken_four, "Open four không được đồng thời là broken four"
+        assert threats == 2, f"Open four phải có đúng 2 ô thắng, nhận {threats}"
+
+    @pytest.mark.parametrize("player", [PLAYER_X, PLAYER_O])
+    def test_creates_open_four_bi_chan_mot_dau_la_broken_four(self, player):
+        """O X X X . -> đặt vào tạo O X X X X .: chỉ còn 1 đầu mở nên là broken four."""
+        # Arrange: quân đối thủ chặn đầu trái tại (5,1)
+        board = _board_with_stones(player, [(5, 2), (5, 3), (5, 4)], [(5, 1)])
+
+        # Act
+        is_open_four = _pattern_api("creates_open_four")(board, 5, 5, player)
+        is_broken_four = _pattern_api("creates_broken_four")(board, 5, 5, player)
+
+        # Assert
+        assert not is_open_four, "Chuỗi 4 bị chặn 1 đầu không phải open four"
+        assert is_broken_four, "Chuỗi 4 bị chặn 1 đầu phải là broken four"
+
+    @pytest.mark.parametrize("player", [PLAYER_X, PLAYER_O])
+    def test_creates_open_four_sat_bien_la_broken_four(self, player):
+        """| X X X . (cột 0..3) -> chuỗi 4 sát mép biên chỉ có 1 đầu mở: broken four."""
+        # Arrange: ba quân tại cột 0, 1, 2; nước thử tại cột 3
+        board = _board_with_stones(player, [(5, 0), (5, 1), (5, 2)])
+
+        # Act
+        is_open_four = _pattern_api("creates_open_four")(board, 5, 3, player)
+        is_broken_four = _pattern_api("creates_broken_four")(board, 5, 3, player)
+
+        # Assert
+        assert not is_open_four, "Chuỗi 4 sát biên không phải open four"
+        assert is_broken_four, "Chuỗi 4 sát biên phải là broken four"
+
+    @pytest.mark.parametrize("player", [PLAYER_X, PLAYER_O])
+    def test_creates_open_four_khoang_trong_la_broken_four(self, player):
+        """X X . X -> đặt thêm thành X X . X X: chỉ có 1 điểm lấp ở giữa nên là broken four."""
+        # Arrange: quân tại (5,2), (5,3), (5,5); nước thử tại (5,6); ô lấp thắng là (5,4)
+        board = _board_with_stones(player, [(5, 2), (5, 3), (5, 5)])
+
+        # Act
+        is_open_four = _pattern_api("creates_open_four")(board, 5, 6, player)
+        is_broken_four = _pattern_api("creates_broken_four")(board, 5, 6, player)
+        threats = _pattern_api("count_winning_threats")(board, 5, 6, player)
+
+        # Assert
+        assert not is_open_four, "X X . X X chỉ có 1 điểm thắng, không phải open four"
+        assert is_broken_four, "X X . X X phải là broken four"
+        assert threats == 1, f"Phải có đúng 1 ô thắng (5,4), nhận {threats}"
+
+    @pytest.mark.parametrize("player", [PLAYER_X, PLAYER_O])
+    def test_chuoi_bi_ngat_boi_doi_thu_khong_phai_four(self, player):
+        """X X O X X: chuỗi bị quân đối thủ ngắt -> không phải open four lẫn broken four."""
+        # Arrange: quân đối thủ nằm giữa tại (5,4); nước thử tại (5,6)
+        board = _board_with_stones(player, [(5, 2), (5, 3), (5, 5)], [(5, 4)])
+
+        # Act
+        is_open_four = _pattern_api("creates_open_four")(board, 5, 6, player)
+        is_broken_four = _pattern_api("creates_broken_four")(board, 5, 6, player)
+
+        # Assert
+        assert not is_open_four, "Chuỗi bị ngắt không phải open four"
+        assert not is_broken_four, "Chuỗi bị ngắt không phải broken four"
+
+    @pytest.mark.parametrize("player", [PLAYER_X, PLAYER_O])
+    @pytest.mark.parametrize("direction_name", list(_LINE_ORIGINS))
+    def test_creates_open_three_bon_huong(self, direction_name, player):
+        """Đặt quân thứ 3 vào chuỗi 2 hở (. . X X X . .) tạo open three ở cả 4 hướng."""
+        # Arrange: hai quân tại k = 0, 1; nước thử tại k = 2; còn chỗ để lên open four
+        direction, origin = _LINE_ORIGINS[direction_name]
+        board = _board_with_stones(player, _line_cells(origin, direction, (0, 1)))
+        row, col = _line_cells(origin, direction, (2,))[0]
+
+        # Act
+        is_open_three = _pattern_api("creates_open_three")(board, row, col, player)
+        is_open_four = _pattern_api("creates_open_four")(board, row, col, player)
+        is_broken_four = _pattern_api("creates_broken_four")(board, row, col, player)
+
+        # Assert
+        assert is_open_three, f"Hướng {direction_name}: phải là open three"
+        assert not is_open_four and not is_broken_four, (
+            "Open three chưa tạo nước thắng ngay nên không phải open/broken four"
+        )
+
+    @pytest.mark.parametrize("player", [PLAYER_X, PLAYER_O])
+    def test_creates_open_three_chuoi_khoang_trong(self, player):
+        """. X . X . -> đánh vào thành . X . X X . vẫn là open three (lấp ô giữa lên open four)."""
+        # Arrange: quân tại (5,3), (5,5); nước thử tại (5,6)
+        board = _board_with_stones(player, [(5, 3), (5, 5)])
+
+        # Act
+        is_open_three = _pattern_api("creates_open_three")(board, 5, 6, player)
+
+        # Assert
+        assert is_open_three, ". X . X X . phải là open three"
+
+    @pytest.mark.parametrize("player", [PLAYER_X, PLAYER_O])
+    def test_creates_open_three_chuoi_khoang_trong_thu_hai(self, player):
+        """. X X . X . -> đánh quân rời thành chuỗi có khoảng trống vẫn là open three."""
+        # Arrange: quân tại (5,3), (5,4); nước thử tại (5,6); ô lấp (5,5) tạo open four
+        board = _board_with_stones(player, [(5, 3), (5, 4)])
+
+        # Act
+        is_open_three = _pattern_api("creates_open_three")(board, 5, 6, player)
+
+        # Assert
+        assert is_open_three, ". X X . X . phải là open three"
+
+    @pytest.mark.parametrize("player", [PLAYER_X, PLAYER_O])
+    def test_creates_open_three_bi_chan_mot_dau_khong_phai(self, player):
+        """O X X . . -> đặt vào thành O X X X . .: bị chặn một đầu nên KHÔNG phải open three."""
+        # Arrange: quân đối thủ chặn đầu trái tại (5,2); nước thử tại (5,5)
+        board = _board_with_stones(player, [(5, 3), (5, 4)], [(5, 2)])
+
+        # Act
+        is_open_three = _pattern_api("creates_open_three")(board, 5, 5, player)
+
+        # Assert
+        assert not is_open_three, "Chuỗi 3 bị chặn 1 đầu không đủ để lên open four"
+
+    @pytest.mark.parametrize("player", [PLAYER_X, PLAYER_O])
+    def test_creates_open_three_sat_bien_khong_phai(self, player):
+        """| X X . -> sát mép biên không đủ không gian 5 ô hở hai đầu nên KHÔNG phải open three."""
+        # Arrange: hai quân tại cột 0, 1; nước thử tại cột 2
+        board = _board_with_stones(player, [(5, 0), (5, 1)])
+
+        # Act
+        is_open_three = _pattern_api("creates_open_three")(board, 5, 2, player)
+
+        # Assert
+        assert not is_open_three, "Chuỗi 3 sát biên không thể lên open four"
+
+    def test_count_winning_threats_khong_co_nuoc_thang(self):
+        """Đặt quân thứ 3 chưa tạo ô thắng nào -> count_winning_threats == 0."""
+        # Arrange
+        board = _board_with_stones(PLAYER_X, [(5, 4), (5, 5)])
+
+        # Act
+        threats = _pattern_api("count_winning_threats")(board, 5, 6, PLAYER_X)
+
+        # Assert
+        assert threats == 0, f"Chưa có ô thắng nào, nhận {threats}"
+
+    def test_pattern_khong_sua_board(self):
+        """Các hàm pattern không được làm biến đổi mảng board đầu vào."""
+        # Arrange: thế cờ có cả quân X và O, thử trên nhiều ô khác nhau
+        board = _board_with_stones(
+            PLAYER_X, [(5, 2), (5, 3), (5, 4), (3, 3)], [(5, 1), (7, 7), (2, 8)]
+        )
+        snapshot = board.copy()
+        names = (
+            "count_winning_threats",
+            "creates_open_four",
+            "creates_broken_four",
+            "creates_open_three",
+        )
+
+        # Act: gọi mọi hàm trên nhiều ô và cả hai phía
+        for name in names:
+            func = _pattern_api(name)
+            for row, col in [(5, 5), (5, 0), (4, 4), (0, 0)]:
+                for player in (PLAYER_X, PLAYER_O):
+                    func(board, row, col, player)
+
+        # Assert
+        np.testing.assert_array_equal(
+            board, snapshot, err_msg="Hàm pattern đã sửa đổi mảng board đầu vào"
+        )
+
+    def test_kieu_tra_ve_cua_ham_pattern(self):
+        """count_winning_threats trả về int; các hàm creates_* trả về bool thuần."""
+        # Arrange
+        board = _board_with_stones(PLAYER_X, [(5, 3), (5, 4), (5, 5)])
+
+        # Act
+        threats = _pattern_api("count_winning_threats")(board, 5, 6, PLAYER_X)
+        flags = [
+            _pattern_api(name)(board, 5, 6, PLAYER_X)
+            for name in ("creates_open_four", "creates_broken_four", "creates_open_three")
+        ]
+
+        # Assert
+        assert isinstance(threats, int) and not isinstance(threats, bool)
+        assert all(isinstance(flag, bool) for flag in flags), (
+            f"Các hàm creates_* phải trả về bool thuần, nhận {[type(f) for f in flags]}"
+        )
+
+
+# ===========================================================================
+# PHẦN 8 — Thứ tự ưu tiên và xung đột giữa các tầng luật (use_patterns=True)
+# ===========================================================================
+
+class TestPatternPriorityAndConflict:
+    """Kiểm tra bảng ưu tiên: tầng cao hơn phải thắng khi nhiều luật cùng kích hoạt."""
+
+    def test_win_now_hon_attack_open_four(self):
+        """X vừa có nước thắng ngay, vừa có nước tạo open four -> chọn win_now."""
+        # Arrange: hàng 5 có 4 quân (thắng tại (5,0)/(5,5)); cột 3 có 3 quân hở (đánh (8,3) tạo open four)
+        board = _build_turn_board(
+            PLAYER_X,
+            [(5, 1), (5, 2), (5, 3), (5, 4), (6, 3), (7, 3)],
+            [],
+        )
+        agent = RuleBasedAgent(use_patterns=True)
+
+        # Act
+        action = agent.choose_action(board, PLAYER_X)
+        info = agent.explain_last_action()
+
+        # Assert
+        assert info["rule_triggered"] == "win_now"
+        assert action in {(5, 0), (5, 5)}, f"Phải thắng ngay tại đầu chuỗi, nhận {action}"
+
+    def test_block_urgent_hon_attack_open_four(self):
+        """X có thể tạo open four nhưng O đang đe dọa thắng ngay -> chọn block_urgent."""
+        # Arrange: X có 3 quân hở hàng 8; O có 4 quân hàng 2 (thắng tại (2,0)/(2,5))
+        board = _build_turn_board(
+            PLAYER_X,
+            [(8, 3), (8, 4), (8, 5)],
+            [(2, 1), (2, 2), (2, 3), (2, 4)],
+        )
+        agent = RuleBasedAgent(use_patterns=True)
+
+        # Act
+        action = agent.choose_action(board, PLAYER_X)
+        info = agent.explain_last_action()
+
+        # Assert
+        assert info["rule_triggered"] == "block_urgent"
+        assert action in {(2, 0), (2, 5)}, f"Phải chặn một đầu chuỗi 4 của O, nhận {action}"
+
+    def test_attack_open_four_hon_block_open_four(self):
+        """Hai bên đều có 3 quân hở: tự tạo open four kết liễu ưu tiên hơn chặn đối thủ."""
+        # Arrange: X 3 quân hàng 8, O 3 quân hàng 2; X đến lượt
+        board = _build_turn_board(
+            PLAYER_X,
+            [(8, 3), (8, 4), (8, 5)],
+            [(2, 3), (2, 4), (2, 5)],
+        )
+        agent = RuleBasedAgent(use_patterns=True)
+
+        # Act
+        action = agent.choose_action(board, PLAYER_X)
+        info = agent.explain_last_action()
+
+        # Assert
+        assert info["rule_triggered"] == "attack_open_four"
+        assert _pattern_api("creates_open_four")(board, *action, PLAYER_X), (
+            f"Nước {action} phải tạo open four cho X"
+        )
+
+    def test_block_open_four_hon_attack_broken_four(self):
+        """X chỉ tạo được broken four (bị chặn 1 đầu) nhưng O sắp tạo open four -> phải chặn trước."""
+        # Arrange: X 3 quân hàng 8 bị O chặn tại (8,2); O có 3 quân hở hàng 2
+        board = _build_turn_board(
+            PLAYER_X,
+            [(8, 3), (8, 4), (8, 5)],
+            [(8, 2), (2, 3), (2, 4), (2, 5)],
+        )
+        assert _pattern_api("creates_broken_four")(board, 8, 6, PLAYER_X), (
+            "Điều kiện thế cờ: X phải có nước tạo broken four tại (8,6)"
+        )
+        agent = RuleBasedAgent(use_patterns=True)
+
+        # Act
+        action = agent.choose_action(board, PLAYER_X)
+        info = agent.explain_last_action()
+
+        # Assert
+        assert info["rule_triggered"] == "block_open_four"
+        assert _pattern_api("creates_open_four")(board, *action, PLAYER_O), (
+            f"Nước {action} phải là ô O dùng để tạo open four"
+        )
+
+    def test_block_open_four_hon_attack_open_three(self):
+        """X có thể tự tạo open three nhưng O sắp tạo open four -> phải chặn trước."""
+        # Arrange: X 2 quân hàng 8; O 3 quân hở hàng 2
+        board = _scenario_board("block_open_four", PLAYER_X)
+        assert _pattern_api("creates_open_three")(board, 8, 5, PLAYER_X), (
+            "Điều kiện thế cờ: X phải có nước tạo open three tại (8,5)"
+        )
+        agent = RuleBasedAgent(use_patterns=True)
+
+        # Act
+        action = agent.choose_action(board, PLAYER_X)
+        info = agent.explain_last_action()
+
+        # Assert
+        assert info["rule_triggered"] == "block_open_four"
+        assert _pattern_api("creates_open_four")(board, *action, PLAYER_O)
+
+    def test_attack_broken_four_hon_attack_open_three(self):
+        """X vừa tạo được broken four vừa tạo được open three -> ưu tiên broken four."""
+        # Arrange: hàng 8 có 3 quân X bị O chặn tại (8,2); hàng 2 có 2 quân X hở
+        board = _scenario_board("attack_broken_four", PLAYER_X)
+        assert _pattern_api("creates_open_three")(board, 2, 5, PLAYER_X), (
+            "Điều kiện thế cờ: X phải có nước tạo open three tại (2,5)"
+        )
+        agent = RuleBasedAgent(use_patterns=True)
+
+        # Act
+        action = agent.choose_action(board, PLAYER_X)
+        info = agent.explain_last_action()
+
+        # Assert
+        assert info["rule_triggered"] == "attack_broken_four"
+        assert _pattern_api("creates_broken_four")(board, *action, PLAYER_X)
+
+    def test_attack_open_three_hon_block_open_three(self):
+        """Hai bên đều có 2 quân hở: tự tạo open three ưu tiên hơn chặn open three của đối thủ."""
+        # Arrange
+        board = _scenario_board("attack_open_three", PLAYER_X)
+        assert _pattern_api("creates_open_three")(board, 2, 5, PLAYER_O), (
+            "Điều kiện thế cờ: O phải có nước tạo open three tại (2,5)"
+        )
+        agent = RuleBasedAgent(use_patterns=True)
+
+        # Act
+        action = agent.choose_action(board, PLAYER_X)
+        info = agent.explain_last_action()
+
+        # Assert
+        assert info["rule_triggered"] == "attack_open_three"
+        assert _pattern_api("creates_open_three")(board, *action, PLAYER_X)
+
+    def test_block_open_three_hon_positional_fallback(self):
+        """X không có đòn tấn công nào, O sắp tạo open three -> chặn thay vì chọn theo vị trí."""
+        # Arrange
+        board = _scenario_board("block_open_three", PLAYER_X)
+        agent = RuleBasedAgent(use_patterns=True)
+
+        # Act
+        action = agent.choose_action(board, PLAYER_X)
+        info = agent.explain_last_action()
+
+        # Assert
+        assert info["rule_triggered"] == "block_open_three"
+        assert _pattern_api("creates_open_three")(board, *action, PLAYER_O)
+
+    @pytest.mark.parametrize("player", [PLAYER_X, PLAYER_O])
+    @pytest.mark.parametrize(
+        "label",
+        [
+            "attack_open_four",
+            "block_open_four",
+            "attack_broken_four",
+            "attack_open_three",
+            "block_open_three",
+        ],
+    )
+    def test_doi_xung_goc_nhin_x_o(self, label, player):
+        """Đảo vai X/O trên cùng hình thái cờ: tác tử phải chọn cùng loại luật, không thiên lệch."""
+        # Arrange: cùng hình thái, bên `player` đến lượt (số quân hợp lệ theo lượt đi)
+        board = _scenario_board(label, player)
+        snapshot = board.copy()
+        agent = RuleBasedAgent(use_patterns=True)
+
+        # Act
+        action = agent.choose_action(board, player)
+        info = agent.explain_last_action()
+
+        # Assert
+        assert info["rule_triggered"] == label, (
+            f"player={player}: kỳ vọng {label}, nhận {info['rule_triggered']}"
+        )
+        assert _action_satisfies_label(board, action, player, label), (
+            f"player={player}: nước {action} không đúng bản chất luật {label}"
+        )
+        np.testing.assert_array_equal(board, snapshot)
+
+
+# ===========================================================================
+# PHẦN 9 — Đe dọa kép, truy vết và tương thích ngược
+# ===========================================================================
+
+class TestDoubleThreatAndPatternContract:
+    """Kiểm tra đe dọa kép, hợp đồng truy vết, tương thích ngược và phá hòa ở tầng pattern."""
+
+    def test_de_doa_kep_hai_dau_van_kich_hoat_block_urgent(self):
+        """. O O O O . (2 ô thắng độc lập): agent chặn 1 trong 2 đầu hợp lệ, không phát sinh lỗi."""
+        # Arrange: O có 4 quân hở hai đầu hàng 2; X (đến lượt) không có đòn nào
+        board = _build_turn_board(PLAYER_X, [], [(2, 1), (2, 2), (2, 3), (2, 4)])
+        agent = RuleBasedAgent(use_patterns=True)
+
+        # Act
+        action = agent.choose_action(board, PLAYER_X)
+        info = agent.explain_last_action()
+
+        # Assert
+        assert info["rule_triggered"] == "block_urgent"
+        assert action in {(2, 0), (2, 5)}, f"Phải chặn một trong hai đầu, nhận {action}"
+        assert board[action] == EMPTY, "Nước chặn phải nằm trên ô trống"
+
+    @pytest.mark.parametrize(
+        "label",
+        [
+            "attack_open_four",
+            "block_open_four",
+            "attack_broken_four",
+            "attack_open_three",
+            "block_open_three",
+        ],
+    )
+    def test_explain_tang_pattern_day_du_khoa(self, label):
+        """Tầng pattern phải ghi đủ 5 khóa truy vết (reason tiếng Việt), action là tuple[int, int]."""
+        # Arrange
+        board = _scenario_board(label, PLAYER_X)
+        agent = RuleBasedAgent(use_patterns=True)
+
+        # Act
+        action = agent.choose_action(board, PLAYER_X)
+        info = agent.explain_last_action()
+
+        # Assert: kiểu trả về của choose_action
+        assert isinstance(action, tuple) and len(action) == 2
+        assert all(type(value) is int for value in action), (
+            f"Hành động phải gồm số nguyên Python thuần, nhận {action!r}"
+        )
+        # Assert: nhãn luật và đủ 5 khóa truy vết
+        required_keys = {
+            "rule_triggered", "selected_action",
+            "candidate_count", "matching_actions", "reason",
+        }
+        assert required_keys.issubset(info.keys()), (
+            f"Thiếu khóa: {required_keys - set(info.keys())}"
+        )
+        assert info["rule_triggered"] == label
+        assert info["selected_action"] == action
+        assert isinstance(info["candidate_count"], int) and info["candidate_count"] > 0
+        assert isinstance(info["matching_actions"], list)
+        assert action in info["matching_actions"], (
+            "Nước đã chọn phải nằm trong matching_actions của tầng kích hoạt"
+        )
+        assert isinstance(info["reason"], str) and info["reason"], "reason không được rỗng"
+        assert any(ord(char) > 127 for char in info["reason"]), (
+            "reason phải bằng tiếng Việt (có ký tự có dấu)"
+        )
+
+    @pytest.mark.parametrize(
+        "label", ["attack_open_four", "attack_open_three", "block_open_three"]
+    )
+    def test_use_patterns_false_bo_qua_tang_pattern(self, label):
+        """use_patterns=False bỏ qua tầng pattern và rơi xuống positional_fallback; True thì kích hoạt."""
+        # Arrange: thế cờ chưa có win_now/block_urgent nhưng có pattern tiềm năng
+        board = _scenario_board(label, PLAYER_X)
+        agent_off = RuleBasedAgent(use_patterns=False)
+        agent_on = RuleBasedAgent(use_patterns=True)
+
+        # Act
+        agent_off.choose_action(board, PLAYER_X)
+        agent_on.choose_action(board, PLAYER_X)
+
+        # Assert
+        assert agent_off.explain_last_action()["rule_triggered"] == "positional_fallback", (
+            "use_patterns=False phải giữ nguyên hành vi baseline Giai đoạn 1"
+        )
+        assert agent_on.explain_last_action()["rule_triggered"] == label, (
+            "use_patterns=True phải kích hoạt đúng tầng pattern"
+        )
+
+    def test_mac_dinh_use_patterns_la_false(self):
+        """Mặc định use_patterns=False để không làm đổi hành vi baseline Giai đoạn 1."""
+        # Arrange & Act
+        agent = RuleBasedAgent()
+
+        # Assert
+        assert agent.use_patterns is False
+
+    @pytest.mark.parametrize("label", ["attack_open_four", "attack_open_three"])
+    def test_pha_hoa_tat_dinh_o_tang_pattern(self, label):
+        """seed=None: nhiều nước cùng loại pattern vẫn cho kết quả tất định, ổn định giữa các agent."""
+        # Arrange
+        board = _scenario_board(label, PLAYER_X)
+        agent_a = RuleBasedAgent(use_patterns=True, seed=None)
+        agent_b = RuleBasedAgent(use_patterns=True, seed=None)
+
+        # Act
+        actions_a = [agent_a.choose_action(board, PLAYER_X) for _ in range(5)]
+        actions_b = [agent_b.choose_action(board, PLAYER_X) for _ in range(5)]
+
+        # Assert
+        assert agent_a.explain_last_action()["rule_triggered"] == label
+        assert len(set(actions_a)) == 1, "Tất định: 5 lần gọi liên tiếp phải cùng một nước"
+        assert actions_a == actions_b, "Tất định: hai agent khác nhau phải cùng kết quả"
+
+    @pytest.mark.parametrize("label", ["attack_open_four", "attack_open_three"])
+    def test_pha_hoa_seed_tai_lap_o_tang_pattern(self, label):
+        """seed=42: hai instance cùng seed tái lập kết quả; mọi nước đều đúng bản chất luật."""
+        # Arrange
+        board = _scenario_board(label, PLAYER_X)
+        agent_a = RuleBasedAgent(use_patterns=True, seed=42)
+        agent_b = RuleBasedAgent(use_patterns=True, seed=42)
+
+        # Act
+        actions_a = [agent_a.choose_action(board, PLAYER_X) for _ in range(10)]
+        actions_b = [agent_b.choose_action(board, PLAYER_X) for _ in range(10)]
+
+        # Assert
+        assert agent_a.explain_last_action()["rule_triggered"] == label
+        assert actions_a == actions_b, "Cùng seed phải tái lập đúng dãy nước đi"
+        assert all(
+            _action_satisfies_label(board, action, PLAYER_X, label) for action in actions_a
+        ), "Mọi nước chọn ngẫu nhiên phải đúng bản chất luật pattern"
+
+    @pytest.mark.parametrize("label", list(_PATTERN_SCENARIOS))
+    def test_tang_pattern_khong_sua_board(self, label):
+        """choose_action với use_patterns=True không được sửa mảng board đầu vào."""
+        # Arrange
+        board = _scenario_board(label, PLAYER_X)
+        snapshot = board.copy()
+        agent = RuleBasedAgent(use_patterns=True)
+
+        # Act
+        agent.choose_action(board, PLAYER_X)
+
+        # Assert
+        np.testing.assert_array_equal(
+            board, snapshot, err_msg="Tầng pattern đã sửa đổi mảng board đầu vào"
+        )

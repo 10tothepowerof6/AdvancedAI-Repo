@@ -376,7 +376,7 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 - [ ] Không đưa vào Git các file không liên quan, thư mục môi trường ảo (`.venv`) hoặc dữ liệu có dung lượng lớn.
 - [ ] Nhóm trưởng xác nhận kiểm thử tích hợp thành công trước khi chính thức nghiệm thu phần việc.
 
-*Trạng thái tài liệu: Giai đoạn 1 hoàn thành — tác tử, bộ test và notebook đã xác nhận. Giai đoạn 2 & 3 chờ triển khai.*
+*Trạng thái tài liệu: Giai đoạn 1 & Giai đoạn 2 hoàn thành — tác tử, bộ test (120/120 PASSED) và notebook (Phần 1–6) đã xác nhận. Giai đoạn 3 chờ triển khai.*
 
 ---
 
@@ -406,3 +406,41 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 - `tests/test_rule_based_agent.py`: **48/48 PASSED** (100%)
 - `pytest tests -v` (toàn dự án): **130/130 PASSED**
 - Không làm gãy bất kỳ bài test nền tảng nào.
+
+---
+
+## 13. Nhật ký thực hiện — Giai đoạn 2
+
+### Trạng thái: Hoàn thành (trên nhánh `feature/rule-based-patterns`)
+
+### Quyết định thiết kế chính
+- **Định nghĩa 4 hàm nhận diện Pattern cấp module dựa trên số mối đe dọa thắng ngay phát sinh** (trên bản sao cục bộ `board.copy()`, tuyệt đối không biến đổi mảng `board` đầu vào):
+  1. `count_winning_threats(board, row, col, player, win_length=5) -> int`: Đếm số ô trống dọc theo 4 hướng đi qua `(row, col)` (bán kính `1 .. win_length - 1`) mới trở thành nước thắng ngay (`is_winning_move == True`) sau khi giả lập đặt quân `player` vào `(row, col)`.
+  2. `creates_open_four(board, row, col, player, win_length=5) -> bool`: Trả về `True` khi `count_winning_threats >= 2` (chuỗi 4 mở hai đầu `. X X X X .` hoặc nước giao điểm tạo đa đe dọa thắng ngay).
+  3. `creates_broken_four(board, row, col, player, win_length=5) -> bool`: Trả về `True` khi `count_winning_threats == 1` (chuỗi 4 bị chặn 1 đầu `O X X X X .`, sát biên `| X X X X .`, hoặc chuỗi 4 có khoảng trống `X X . X X`).
+  4. `creates_open_three(board, row, col, player, win_length=5) -> bool`: Trả về `True` khi nước đi chưa tạo đe dọa thắng ngay (`count_winning_threats == 0`) nhưng mở ra ít nhất 1 ô trống mới dọc theo 4 trục hướng thỏa mãn `creates_open_four == True` ở lượt kế tiếp (bao quát cả tam mở liền `. . X X X . .` và tam mở nhảy `. X X . X .`).
+- **Bảng phân cấp ưu tiên 8 tầng khi `use_patterns=True`** (giữ mặc định `use_patterns=False` để tương thích ngược 100% với Giai đoạn 1):
+  1. `win_now` (quét toàn bàn)
+  2. `block_urgent` (quét toàn bàn)
+  3. `attack_open_four` (quét trên `candidate_actions(board, radius=self.candidate_radius)`)
+  4. `block_open_four` (quét trên `candidates`)
+  5. `attack_broken_four` (quét trên `candidates`)
+  6. `attack_open_three` (quét trên `candidates`)
+  7. `block_open_three` (quét trên `candidates`)
+  8. `positional_fallback` (quét trên `candidates`)
+- **Truy vết và thống kê:** Mỗi tầng pattern được duyệt cộng thêm `len(candidates)` vào `stats["nodes_visited"]`; `explain_last_action()` trả về đầy đủ 5 khóa (`rule_triggered`, `selected_action`, `candidate_count`, `matching_actions`, `reason` tiếng Việt).
+
+### Thông số cấu hình đã xác nhận
+- `candidate_radius = 2` (áp dụng cho tầng 3–8 khi `use_patterns=True`)
+- `use_patterns = True` (cho chế độ đầy đủ pattern Giai đoạn 2; mặc định `__init__` giữ `False`)
+- `seed = None` (tất định) hoặc số nguyên tái lập được
+- `win_length = 5`
+
+### Hạn chế kỹ thuật đã biết
+- **Đe dọa kép (Double Threat):** Khi đối thủ đã tạo thành công chuỗi 4 mở hai đầu (`. O O O O .`) hoặc giao điểm đa đe dọa thắng ngay, mỗi lượt chỉ được đi 1 quân nên tầng `block_urgent` chỉ chặn được 1 đầu; đối thủ vẫn thắng ở đầu còn lại. Cách phòng thủ duy nhất là chặn sớm ở tầng `block_open_four` / `block_open_three`.
+- **Phạm vi ứng viên bán kính 2 và chi phí lồng nhau:** Các tầng pattern (tầng 3–7) chỉ duyệt trên `candidate_actions(radius=2)` để giữ thời gian suy nghĩ ~1–4 ms/nước (do `creates_open_three` gọi kiểm tra `creates_open_four` sâu 1 bước), nên có thể bỏ qua một số nước nhảy cách xa đám quân hiện có hơn 2 ô.
+
+### Kết quả kiểm thử
+- `tests/test_rule_based_agent.py`: **120/120 PASSED** (48 ca Giai đoạn 1 + 72 ca Giai đoạn 2 tại `TestPatternRecognition`, `TestPatternPriorityAndConflict`, `TestDoubleThreatAndPatternContract`).
+- `pytest tests -v` (toàn dự án): **202/202 PASSED** (100%).
+- `notebooks/01_rule_based.ipynb`: Hoàn thiện Phần 1–6 (17 code cells thực thi tuần tự không lỗi, 18 kịch bản Phần 4 + 9 mẫu đối chứng Phần 5 + 8 kịch bản xung đột/truy vết Phần 6 đều đạt **100% PASS**).
