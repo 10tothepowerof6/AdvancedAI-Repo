@@ -10,6 +10,7 @@ import pytest
 from agents.minimax_agent import (
     WIN_SCORE,
     WINDOW_WEIGHTS,
+    MinimaxSearcher,
     SearchState,
     default_weights,
     evaluate,
@@ -575,3 +576,306 @@ def test_input_board_stays_writable():
     board[5, 5] = X
     # Assert
     assert board.flags.writeable and board[5, 5] == X
+
+
+# Giai đoạn 2 - Minimax, Alpha-Beta và tác tử
+
+def _reference_value(state, depth, root, ply=0, radius=2):
+    """Minimax tham chiếu viết độc lập: duyệt hết, không cắt tỉa, không sắp xếp."""
+    if state.is_terminal():
+        score = terminal_score(state.result(), root)
+        return score - ply if score > 0 else score + ply if score < 0 else 0
+    if depth == 0:
+        return evaluate(state, root)
+    values = [_reference_value(state.apply(a), depth - 1, root, ply + 1, radius)
+              for a in state.candidates(radius)]
+    return max(values) if state.current_player == root else min(values)
+
+
+def _reference_node_count(state, depth):
+    """Số nút nếu nút terminal không được mở rộng và dừng đúng ở độ sâu depth."""
+    if state.is_terminal() or depth == 0:
+        return 1
+    return 1 + sum(_reference_node_count(state.apply(a), depth - 1) for a in state.candidates())
+
+
+def _reference_alpha_beta(state, depth, alpha, beta, root, ply, counter, radius=2):
+    """Alpha-Beta tham chiếu viết độc lập, thứ tự hàng/cột, để đối chiếu số đếm.
+
+    counter["nodes"] đếm mọi nút được duyệt; counter["cuts"] chỉ tăng khi lần cắt
+    thực sự bỏ qua ít nhất một nước con chưa xét.
+    """
+    counter["nodes"] += 1
+    if state.is_terminal():
+        score = terminal_score(state.result(), root)
+        return score - ply if score > 0 else score + ply if score < 0 else 0
+    if depth == 0:
+        return evaluate(state, root)
+    actions = state.candidates(radius)
+    maximizing = state.current_player == root
+    best = -10 * WIN_SCORE if maximizing else 10 * WIN_SCORE
+    for index, action in enumerate(actions):
+        value = _reference_alpha_beta(state.apply(action), depth - 1, alpha, beta,
+                                      root, ply + 1, counter, radius)
+        if maximizing:
+            best, alpha = max(best, value), max(alpha, value)
+        else:
+            best, beta = min(best, value), min(beta, value)
+        if alpha >= beta:
+            counter["cuts"] += index < len(actions) - 1
+            break
+    return best
+
+
+def _state_after(moves):
+    game = _game_after(moves)
+    return SearchState(game.board, game.current_player)
+
+
+def _random_state(seed, n_moves):
+    game = _random_board(seed, n_moves)
+    return SearchState(game.board, game.current_player)
+
+
+# Thế cờ chiến thuật dựng bằng chuỗi nước hợp lệ: (chuỗi nước, tập nước đúng).
+TACTICS = {
+    # X đến lượt, có 4 mở hàng 5: thắng tại (5,2) hoặc (5,7).
+    "X-thắng-ngay": (_interleave([(5, 3), (5, 4), (5, 5), (5, 6)],
+                                 [(0, 0), (0, 2), (0, 4), (0, 6)]), {(5, 2), (5, 7)}),
+    # O đến lượt, có 4 mở hàng 5.
+    "O-thắng-ngay": (_interleave([(0, 0), (0, 2), (0, 4), (0, 6), (10, 10)],
+                                 [(5, 3), (5, 4), (5, 5), (5, 6)]), {(5, 2), (5, 7)}),
+    # X đến lượt, O có 4 bị chặn đầu trái: X phải chặn (5,7).
+    "X-chặn": (_interleave([(5, 2), (9, 0), (9, 4), (9, 8)],
+                           [(5, 3), (5, 4), (5, 5), (5, 6)]), {(5, 7)}),
+    # O đến lượt, X có 4 bị chặn đầu trái: O phải chặn (5,7).
+    "O-chặn": (_interleave([(5, 3), (5, 4), (5, 5), (5, 6), (9, 9)],
+                           [(5, 2), (0, 0), (0, 4), (0, 8)]), {(5, 7)}),
+    # X đến lượt, cả hai cùng có 4 mở: X thắng trước thay vì chặn.
+    "X-thắng-thay-vì-chặn": (_interleave([(5, 3), (5, 4), (5, 5), (5, 6)],
+                                         [(8, 3), (8, 4), (8, 5), (8, 6)]), {(5, 2), (5, 7)}),
+}
+SEARCH_MODES = [(ab, mo) for ab in (False, True) for mo in (False, True)]
+
+
+# Minimax thuần ở độ sâu 3 tốn hàng chục giây nên chỉ chạy độ sâu 3 khi bật cắt tỉa;
+# Minimax thuần độ sâu 3 vẫn được đối chiếu trong test_depth_three_matches_reference_on_small_tree.
+DEPTH_MODES = [(d, ab, mo) for d in (1, 2, 3) for ab, mo in SEARCH_MODES if d < 3 or ab]
+
+
+@pytest.mark.parametrize("depth,ab,ordering", DEPTH_MODES)
+@pytest.mark.parametrize("name", ["X-thắng-ngay", "O-thắng-ngay", "X-thắng-thay-vì-chặn"])
+def test_finds_immediate_win(name, depth, ab, ordering):
+    # Arrange
+    moves, winning = TACTICS[name]
+    state = _state_after(moves)
+    # Act
+    result = MinimaxSearcher(use_alpha_beta=ab, move_ordering=ordering).search(state, depth)
+    # Assert: thắng ở ply 1 nên điểm = WIN_SCORE - 1
+    assert result.action in winning
+    assert result.value == WIN_SCORE - 1
+    assert state.apply(result.action).result() == state.current_player
+
+
+@pytest.mark.parametrize("ab,ordering", SEARCH_MODES)
+@pytest.mark.parametrize("name", ["X-chặn", "O-chặn"])
+def test_blocks_opponent_four_at_depth_two(name, ab, ordering):
+    # Arrange
+    moves, blocking = TACTICS[name]
+    state = _state_after(moves)
+    # Act
+    result = MinimaxSearcher(use_alpha_beta=ab, move_ordering=ordering).search(state, 2)
+    # Assert: chặn đúng ô, và sau khi chặn không còn thua trong tầm nhìn
+    assert result.action in blocking
+    assert abs(result.value) < WIN_SCORE // 2
+
+
+def test_depth_two_sees_threat_of_every_non_blocking_move():
+    """Ở độ sâu 2, mọi nước không chặn đều có giá trị thua ở ply 2."""
+    moves, blocking = TACTICS["X-chặn"]
+    state = _state_after(moves)
+    root = state.current_player
+    for action in state.candidates():
+        value = _reference_value(state.apply(action), 1, root, ply=1)
+        if action in blocking:
+            assert value > -WIN_SCORE // 2
+        else:
+            assert value == -(WIN_SCORE - 2)
+
+
+@pytest.mark.parametrize("ab,ordering", SEARCH_MODES)
+@pytest.mark.parametrize("seed", range(3))
+@pytest.mark.parametrize("depth", [1, 2])
+def test_search_value_matches_reference(seed, depth, ab, ordering):
+    # Arrange
+    state = _random_state(seed, 6)
+    # Act
+    result = MinimaxSearcher(use_alpha_beta=ab, move_ordering=ordering).search(state, depth)
+    # Assert: giá trị gốc đúng, và nước trả về đạt đúng giá trị đó
+    assert result.value == _reference_value(state, depth, state.current_player)
+    child_value = _reference_value(state.apply(result.action), depth - 1, state.current_player, ply=1)
+    assert child_value == result.value
+
+
+def test_depth_three_matches_reference_on_small_tree():
+    # Arrange: 2 quân, bán kính ứng viên 1 nên cây độ sâu 3 đủ nhỏ để duyệt hết
+    state = _state_after([(5, 5), (5, 6)])
+    expected = _reference_value(state, 3, state.current_player, radius=1)
+    # Act + Assert
+    for ab, ordering in SEARCH_MODES:
+        searcher = MinimaxSearcher(use_alpha_beta=ab, move_ordering=ordering, radius=1)
+        assert searcher.search(state, 3).value == expected
+
+
+@pytest.mark.parametrize("ordering", [False, True])
+@pytest.mark.parametrize("seed", range(6))
+@pytest.mark.parametrize("depth", [1, 2])
+def test_alpha_beta_same_value_and_fewer_nodes(seed, depth, ordering):
+    # Arrange
+    state = _random_state(seed, 10 + seed)
+    # Act
+    plain = MinimaxSearcher(use_alpha_beta=False, move_ordering=ordering).search(state, depth)
+    pruned = MinimaxSearcher(use_alpha_beta=True, move_ordering=ordering).search(state, depth)
+    # Assert: cùng giá trị gốc; phá hòa theo nước đầu tiên nên cùng nước đi
+    assert pruned.value == plain.value
+    assert pruned.action == plain.action
+    assert pruned.nodes_visited <= plain.nodes_visited
+    assert plain.pruned_nodes == 0
+
+
+@pytest.mark.parametrize("state_factory,depth,radius", [
+    (lambda: _random_state(3, 12), 2, 2),
+    (lambda: _random_state(8, 16), 2, 2),
+    (lambda: _state_after([(5, 5), (5, 6)]), 3, 1),
+    (lambda: _state_after(TACTICS["X-chặn"][0]), 2, 2),
+    # Có một lần alpha >= beta xảy ra đúng ở nước con cuối: không được tính là cắt tỉa.
+    (lambda: _random_state(1, 1), 3, 1),
+])
+def test_alpha_beta_counters_match_reference(state_factory, depth, radius):
+    """Đối chiếu chính xác số nút và số lần cắt tỉa với bản tham chiếu
+    (cùng thứ tự hàng/cột, không sắp xếp nước)."""
+    # Arrange
+    state = state_factory()
+    counter = {"nodes": 1, "cuts": 0}  # tính cả nút gốc như MinimaxSearcher
+    root, alpha, best = state.current_player, -10 * WIN_SCORE, -10 * WIN_SCORE
+    for action in state.candidates(radius):
+        value = _reference_alpha_beta(state.apply(action), depth - 1, alpha, 10 * WIN_SCORE,
+                                      root, 1, counter, radius)
+        best = max(best, value)
+        alpha = max(alpha, best)
+    # Act
+    result = MinimaxSearcher(use_alpha_beta=True, move_ordering=False, radius=radius).search(state, depth)
+    # Assert
+    assert result.value == best
+    assert result.nodes_visited == counter["nodes"]
+    assert result.pruned_nodes == counter["cuts"]
+
+
+def test_alpha_beta_actually_prunes():
+    # Arrange
+    state = _random_state(3, 12)
+    # Act
+    plain = MinimaxSearcher(use_alpha_beta=False, move_ordering=False).search(state, 2)
+    pruned = MinimaxSearcher(use_alpha_beta=True, move_ordering=False).search(state, 2)
+    # Assert
+    assert pruned.pruned_nodes > 0
+    assert pruned.nodes_visited < plain.nodes_visited
+
+
+@pytest.mark.parametrize("name", ["X-thắng-ngay", "X-chặn"])
+@pytest.mark.parametrize("depth", [1, 2])
+def test_depth_limit_and_terminal_not_expanded(name, depth):
+    """Không cắt tỉa: số nút phải đúng bằng cây duyệt hết, dừng ở độ sâu depth
+    và không mở rộng nút terminal (nước thắng ngay không có nút con)."""
+    state = _state_after(TACTICS[name][0])
+    result = MinimaxSearcher(use_alpha_beta=False, move_ordering=False).search(state, depth)
+    assert result.nodes_visited == _reference_node_count(state, depth)
+    if depth == 1:
+        assert result.nodes_visited == 1 + len(state.candidates())
+
+
+def test_tie_break_keeps_first_best_move():
+    # Arrange: bàn có một quân ở tâm, rất nhiều nước đồng điểm
+    state = _state_after([(5, 5)])
+    root = state.current_player
+    values = {a: _reference_value(state.apply(a), 1, root, ply=1) for a in state.candidates()}
+    best = max(values.values())
+    first_best = next(a for a in state.candidates() if values[a] == best)
+    # Act
+    result = MinimaxSearcher(use_alpha_beta=True, move_ordering=False).search(state, 2)
+    # Assert
+    assert result.value == best
+    assert result.action == first_best
+
+
+def test_search_does_not_mutate_state():
+    # Arrange
+    state = _random_state(4, 14)
+    before = (state.board.copy(), state.current_player, state.last_action, state.move_count)
+    # Act
+    MinimaxSearcher().search(state, 2)
+    # Assert
+    np.testing.assert_array_equal(state.board, before[0])
+    assert (state.current_player, state.last_action, state.move_count) == before[1:]
+
+
+@pytest.mark.parametrize("kwargs", [{"use_alpha_beta": 1}, {"move_ordering": None}, {"radius": 0}])
+def test_searcher_rejects_invalid_config(kwargs):
+    with pytest.raises(ValueError):
+        MinimaxSearcher(**kwargs)
+
+
+@pytest.mark.parametrize("weights", [(1, 2), (0, 1, 10, 100, 1000, -1), (0, 1_000_000, 0, 0, 0, 0)])
+def test_invalid_weights_rejected_by_search(weights):
+    # Arrange
+    searcher = MinimaxSearcher(weights=weights)
+    # Act + Assert: searcher biết luật thắng khi nhận trạng thái
+    with pytest.raises(ValueError):
+        searcher.search(SearchState.initial().apply((5, 5)), 1)
+
+
+def test_search_requires_margin_for_ply_adjusted_wins():
+    # Arrange: bàn 4×4 luật 4 quân có 10 cửa sổ và 16 ô, nên cận phải < WIN_SCORE - 16
+    state = SearchState.initial(4, 4).apply((1, 1))
+    too_close = (0, (WIN_SCORE - 16) // 10 + 1, 0, 0, 0)  # cận 9 999 990: evaluate nhận, search từ chối
+    enough = (0, (WIN_SCORE - 16) // 10 - 1, 0, 0, 0)     # cận 9 999 970
+    # Act + Assert
+    assert heuristic_bound(4, 4, too_close) < WIN_SCORE
+    evaluate(state, X, weights=too_close)
+    with pytest.raises(ValueError, match="WIN_SCORE - 16"):
+        MinimaxSearcher(weights=too_close).search(state, 1)
+    assert MinimaxSearcher(weights=enough).search(state, 1).action is not None
+
+
+@pytest.mark.parametrize("size,win_length", [(3, 3), (6, 4), (11, 5)])
+def test_search_default_weights_follow_state_rule(size, win_length):
+    # Arrange: X có win_length - 1 quân liên tiếp ở hàng 0, đến lượt X
+    moves = []
+    for k in range(win_length - 1):
+        moves += [(0, k), (size - 1, k)]
+    state = SearchState.initial(size, win_length)
+    for move in moves:
+        state = state.apply(move)
+    # Act
+    result = MinimaxSearcher().search(state, 2)
+    # Assert
+    assert result.action == (0, win_length - 1) and result.value == WIN_SCORE - 1
+
+
+def test_default_weights_search_matches_explicit_window_weights():
+    # Arrange
+    state = _random_state(seed=4, n_moves=8)
+    # Act
+    implicit = MinimaxSearcher().search(state, 2)
+    explicit = MinimaxSearcher(weights=WINDOW_WEIGHTS).search(state, 2)
+    # Assert
+    assert implicit == explicit
+
+
+def test_search_rejects_invalid_depth_and_terminal_state():
+    searcher = MinimaxSearcher()
+    with pytest.raises(ValueError):
+        searcher.search(SearchState.initial(), 0)
+    terminal = _state_after(FIXTURES["X-ngang-5"][0])
+    with pytest.raises(ValueError):
+        searcher.search(terminal, 1)
