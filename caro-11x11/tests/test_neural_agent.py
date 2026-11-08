@@ -6,11 +6,15 @@ import json
 
 import numpy as np
 import pytest
+import torch
+from torch.utils.data import DataLoader, TensorDataset
 
 from core.game_engine import CaroGame
 from training.dataset import SPLITS, PolicyDataset, canonical_key, normalize_board, transform_sample
 from training.generate_data import generate_dataset
+from training.model import CaroPolicy, load_policy, mask_occupied, save_policy
 from training.tactical_agent import TacticalAgent
+from training.train import _run_epoch
 
 
 def _position(moves):
@@ -138,3 +142,49 @@ def test_generated_dataset_is_replayable_disjoint_and_deterministic(tmp_path):
         PolicyDataset(first, "test", augment=True)
     with pytest.raises(FileExistsError, match="đã tồn tại"):
         generate_dataset(first, games=24, seed=42)
+
+
+def test_cnn_policy_masks_both_players_and_keeps_legal_logits():
+    boards = torch.zeros((2, 2, 11, 11))
+    boards[0, 0, 0, 1] = 1
+    boards[0, 1, 1, 0] = 1
+    boards[1, 1, 2, 3] = 1
+
+    with torch.inference_mode():
+        raw = CaroPolicy()(boards)
+        masked = mask_occupied(raw, boards)
+    assert raw.shape == (2, 121)
+    assert torch.isfinite(raw).all()
+    assert torch.isneginf(masked).nonzero().tolist() == [[0, 1], [0, 11], [1, 25]]
+    torch.testing.assert_close(masked[1, :25], raw[1, :25])
+
+
+def test_training_step_updates_weights_with_finite_loss():
+    boards = torch.zeros((2, 2, 11, 11))
+    boards[0, 0, 5, 5] = 1
+    boards[1, 1, 5, 6] = 1
+    labels = torch.tensor([59, 60])
+    loader = DataLoader(TensorDataset(boards, labels), batch_size=2)
+    model = CaroPolicy()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    before = [parameter.detach().clone() for parameter in model.parameters()]
+
+    metrics = _run_epoch(model, loader, torch.device("cpu"), optimizer)
+
+    assert 0 < metrics["loss"] < float("inf")
+    assert 0 <= metrics["top1"] <= metrics["top3"] <= 1
+    assert any(not torch.equal(old, new) for old, new in zip(before, model.parameters()))
+
+
+def test_checkpoint_restores_same_logits(tmp_path):
+    path = tmp_path / "policy.pt"
+    model = CaroPolicy().eval()
+    boards = torch.zeros((1, 2, 11, 11))
+    boards[0, 1, 3, 5] = 1
+
+    save_policy(path, model, epoch=2, dataset_sha256="fixture")
+    restored = load_policy(path)
+
+    assert not restored.training
+    with torch.inference_mode():
+        torch.testing.assert_close(restored(boards), model(boards), atol=0, rtol=0)
