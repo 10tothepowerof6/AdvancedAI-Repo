@@ -39,6 +39,10 @@ Thumbs.db
 models/*
 !models/README.md
 !models/.gitkeep
+!models/caro-policy-v1/
+models/caro-policy-v1/*
+!models/caro-policy-v1/policy.pt
+!models/caro-policy-v1/report.json
 training/data/*
 !training/data/.gitkeep
 
