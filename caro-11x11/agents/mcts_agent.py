@@ -1,6 +1,6 @@
-"""MCTS Rollout cho Caro 11×11 — Giai đoạn 1: trạng thái mô phỏng và cây tìm kiếm.
+"""MCTS Rollout cho Caro 11×11 — trạng thái mô phỏng, cây tìm kiếm UCT và tác tử.
 
-Module tách hai tầng:
+Module tách các tầng:
 - MCTSState: dữ liệu thuộc luật cờ (bàn cờ, lượt đi, nước cuối, số nước, kết quả).
   Engine không có API nạp bàn cờ tùy ý nên tầng này tự dựng trạng thái từ đầu vào
   của agent và được kiểm thử đối chiếu với CaroGame qua chuỗi nước đi hợp lệ.
@@ -16,24 +16,42 @@ Quy ước giá trị (giữ nguyên ở mọi giai đoạn):
   UCT = Q/N + c·√(ln N_cha / N_con), có thêm thành phần khám phá; nước chính thức trả về
   được chọn theo số lượt thăm N.
 
-Chưa có vòng tìm kiếm UCT và lớp MCTSAgent; hai phần này thuộc Giai đoạn 2.
+Bốn bước của một mô phỏng (Giai đoạn 2), mỗi bước là một hàm riêng để kiểm thử độc lập:
+1. Lựa chọn — select_child(): đi từ gốc xuống khi nút chưa kết thúc và đã mở rộng hết,
+   chọn con có điểm UCT cao nhất. Dừng tại nút terminal hoặc nút còn nước chưa mở rộng.
+2. Mở rộng — MCTSNode.expand(): thêm đúng một con ứng với một nước chưa thử (chọn ngẫu nhiên
+   theo seed). Bỏ qua nếu nút đã kết thúc.
+3. Mô phỏng — rollout(): từ trạng thái của nút mới, hai bên luân phiên đi ngẫu nhiên đều trên
+   các ô trống tới khi có người thắng hoặc bàn đầy. Không cắt ngắn theo độ sâu. Nút terminal
+   lấy thẳng kết quả, không chạy rollout. Hết thời gian giữa chừng thì trả None: mô phỏng bị bỏ.
+4. Cập nhật ngược — backpropagate(): cộng N += 1 và Q += outcome_value(kết quả, player_just_moved)
+   cho mọi nút trên đường đi, từ nút mới lên gốc.
 """
 
 from __future__ import annotations
 
-from math import sqrt
-from numbers import Integral
+from math import inf, isfinite, log, sqrt
+from numbers import Integral, Real
+from time import perf_counter
+from typing import Callable
 
 import numpy as np
 
+from agents.base_agent import BaseAgent
 from config.game_config import EMPTY, PLAYER_O, PLAYER_X, WIN_LENGTH
+from config.search_budget import SearchBudget
 from core.game_engine import Action, CaroGame
 from core.game_utils import candidate_actions
 
 # Bán kính ứng viên mặc định, trùng với candidate_actions của dự án.
 DEFAULT_RADIUS = 2
-# Hệ số khám phá UCT dự kiến (c = √2); bắt đầu dùng ở Giai đoạn 2.
+# Hệ số khám phá UCT khởi đầu c = √2 (giá trị thường dùng của UCB1 cho phần thưởng trong [0, 1]).
+# Phần thưởng ở đây nằm trong [-1, 1] nên c chỉ là điểm xuất phát, chưa phải giá trị đã hiệu chỉnh.
 DEFAULT_EXPLORATION = sqrt(2)
+# Biên an toàn ở chế độ time: dừng tìm kiếm trước deadline 0,1 giây (1,9 s trên hạn 2,0 s).
+DEFAULT_TIME_MARGIN_S = 0.1
+# Số nước rollout giữa hai lần đọc đồng hồ (đọc mỗi nước cũng được nhưng tốn thêm thời gian).
+_CLOCK_CHECK_EVERY = 8
 
 _DIRECTIONS = CaroGame.DIRECTIONS
 
@@ -130,7 +148,10 @@ class MCTSState:
         return [(int(r), int(c)) for r, c in np.argwhere(self.board == EMPTY)]
 
     def candidate_actions(self, radius: int = DEFAULT_RADIUS) -> list[Action]:
-        """Tập nước rút gọn quanh quân đã có; rỗng khi đã kết thúc."""
+        """Tập nước rút gọn quanh quân đã có; rỗng khi đã kết thúc.
+
+        Không rỗng khi ván chưa kết thúc: còn ô trống thì luôn có ô trống sát một quân nào đó.
+        """
         if self.is_terminal():
             return []
         return candidate_actions(self.board, radius)
@@ -249,3 +270,190 @@ class MCTSNode:
         self.untried_actions.remove(key)
         self.children[key] = child
         return child
+
+
+# ---------------------------------------------------------------- bốn bước MCTS
+
+def uct_score(child: MCTSNode, parent_visits: int, exploration: float) -> float:
+    """Điểm UCT của `child` nhìn từ người đến lượt ở nút cha.
+
+    UCT = Q/N + c·√(ln N_cha / N_con). Q/N (khai thác) đã theo góc nhìn người đang chọn
+    vì Q của con lưu theo `player_just_moved`; thành phần sau (khám phá) lớn khi con ít
+    được thăm so với cha. Con chưa thăm (N = 0) được ưu tiên tuyệt đối: điểm vô cực.
+    """
+    if child.visits == 0:
+        return inf
+    return child.mean_value() + exploration * sqrt(log(parent_visits) / child.visits)
+
+
+def select_child(node: MCTSNode, exploration: float, rng: np.random.Generator) -> MCTSNode:
+    """Bước lựa chọn tại một nút: con có UCT cao nhất; đồng điểm thì chọn ngẫu nhiên theo seed."""
+    if not node.children:
+        raise ValueError("Nút chưa có con để lựa chọn")
+    children = list(node.children.values())
+    scores = [uct_score(child, node.visits, exploration) for child in children]
+    best = max(scores)
+    tied = [child for child, score in zip(children, scores) if score == best]
+    return tied[0] if len(tied) == 1 else tied[int(rng.integers(len(tied)))]
+
+
+def _line_wins(board: list[list[int]], size: int, win_length: int, row: int, col: int, player: int) -> bool:
+    """Kiểm tra thắng qua ô vừa đi trên bàn cờ dạng list (nhanh hơn truy cập phần tử NumPy)."""
+    for dr, dc in _DIRECTIONS:
+        count = 1
+        r, c = row + dr, col + dc
+        while 0 <= r < size and 0 <= c < size and board[r][c] == player:
+            count += 1
+            r, c = r + dr, c + dc
+        r, c = row - dr, col - dc
+        while 0 <= r < size and 0 <= c < size and board[r][c] == player:
+            count += 1
+            r, c = r - dr, c - dc
+        if count >= win_length:
+            return True
+    return False
+
+
+def rollout(state: MCTSState, rng: np.random.Generator, stop_at: float | None = None,
+            trace: list[Action] | None = None) -> int | None:
+    """Bước mô phỏng: chơi ngẫu nhiên tới khi kết thúc, trả kết quả theo góc nhìn X.
+
+    Chính sách: hai bên luân phiên, mỗi nước chọn ngẫu nhiên đều trong các ô trống còn lại
+    (tương đương đi theo một hoán vị ngẫu nhiên của các ô trống). Dừng khi có chuỗi thắng
+    (≥ 5 quân, kể cả bị chặn hai đầu) hoặc bàn đầy (hòa). Không cắt ngắn theo độ sâu.
+    `state` không bị sửa. Trạng thái terminal trả thẳng kết quả, không đi thêm nước nào.
+    Nếu `stop_at` (giá trị perf_counter) đã qua trong lúc chơi thì trả None: mô phỏng bị bỏ,
+    không được đếm và không được cập nhật ngược. `trace` (nếu có) nhận các nước đã đi.
+    """
+    if state.is_terminal():
+        return state.result()
+    board = state.board.tolist()
+    size, win_length = state.size, state.win_length
+    empties = [(int(r), int(c)) for r, c in np.argwhere(state.board == EMPTY)]
+    player = state.current_player
+    for index, cell in enumerate(rng.permutation(len(empties))):
+        if stop_at is not None and index % _CLOCK_CHECK_EVERY == 0 and perf_counter() >= stop_at:
+            return None
+        row, col = empties[cell]
+        board[row][col] = player
+        if trace is not None:
+            trace.append((row, col))
+        if _line_wins(board, size, win_length, row, col, player):
+            return player
+        player = -player
+    return 0
+
+
+def backpropagate(node: MCTSNode | None, result: int) -> None:
+    """Bước cập nhật ngược: từ `node` lên gốc, N += 1 và Q += giá trị theo góc nhìn từng nút."""
+    while node is not None:
+        node.visits += 1
+        node.value += outcome_value(result, node.player_just_moved)
+        node = node.parent
+
+
+def best_action(root: MCTSNode, rng: np.random.Generator) -> Action | None:
+    """Quyết định cuối: con có N lớn nhất; đồng N thì Q/N cao hơn; vẫn đồng thì ngẫu nhiên theo seed.
+
+    Trả None nếu chưa có con nào được thăm (chưa hoàn thành mô phỏng nào).
+    """
+    visited = [child for child in root.children.values() if child.visits > 0]
+    if not visited:
+        return None
+    key = max((child.visits, child.mean_value()) for child in visited)
+    tied = [child for child in visited if (child.visits, child.mean_value()) == key]
+    chosen = tied[0] if len(tied) == 1 else tied[int(rng.integers(len(tied)))]
+    return chosen.action
+
+
+# ---------------------------------------------------------------- tác tử
+
+class MCTSAgent(BaseAgent):
+    """Tác tử MCTS + UCT + rollout ngẫu nhiên, tuân theo hợp đồng BaseAgent.
+
+    - Ngân sách đọc từ `self.budget` tại mỗi lượt (runner gán lại budget sau khi tạo agent).
+      `fixed`: chạy đúng `budget.simulations` mô phỏng hoàn thành.
+      `time`: chạy tới `deadline − biên`, biên = min(time_margin_s, 0,5 × time_limit_s);
+      không dùng `simulations` làm điều kiện dừng phụ.
+    - Luôn có nước dự phòng (một ứng viên chọn ngẫu nhiên theo seed) phòng khi chưa hoàn thành
+      mô phỏng nào trước mốc dừng.
+    - Cây được dựng mới ở mỗi lượt (không tái sử dụng giữa các nước).
+    - Thống kê mỗi lượt: `simulations` = mô phỏng hoàn thành; `nodes_visited` = số nút mới tạo
+      (không tính gốc); `pruned_nodes` = 0.
+    """
+
+    def __init__(self, seed: int | None = None, *, budget: SearchBudget | None = None,
+                 exploration: float = DEFAULT_EXPLORATION, radius: int = DEFAULT_RADIUS,
+                 time_margin_s: float = DEFAULT_TIME_MARGIN_S, name: str = "MCTS"):
+        super().__init__(name, budget=budget)
+        if (isinstance(exploration, bool) or not isinstance(exploration, Real)
+                or not isfinite(exploration) or exploration < 0):
+            raise ValueError("Hệ số khám phá phải là số thực hữu hạn không âm")
+        if isinstance(radius, bool) or not isinstance(radius, Integral) or radius < 1:
+            raise ValueError("Bán kính phải là số nguyên dương")
+        if (isinstance(time_margin_s, bool) or not isinstance(time_margin_s, Real)
+                or not isfinite(time_margin_s) or time_margin_s < 0):
+            raise ValueError("Biên an toàn thời gian phải là số thực hữu hạn không âm")
+        self.exploration = float(exploration)
+        self.radius = int(radius)
+        self.time_margin_s = float(time_margin_s)
+        self.rng = np.random.default_rng(seed)
+        self.last_root: MCTSNode | None = None
+
+    def _stop_at(self) -> float | None:
+        """Mốc dừng hợp tác ở chế độ time; None ở chế độ fixed hoặc khi gọi ngoài choose_action."""
+        if self.budget.mode != "time" or self.deadline is None:
+            return None
+        return self.deadline - min(self.time_margin_s, 0.5 * self.budget.time_limit_s)
+
+    def search(self, board: np.ndarray, player: int,
+               trace: Callable[[dict[str, object]], None] | None = None) -> tuple[MCTSNode, Action]:
+        """Chạy tìm kiếm, trả (gốc cây, nước dự phòng); cập nhật `stats` và `last_root`.
+
+        `trace` (nếu có) được gọi sau mỗi mô phỏng hoàn thành với dict mô tả bốn bước;
+        notebook dùng nó để quan sát, không ảnh hưởng thuật toán.
+        """
+        if not isinstance(self.budget, SearchBudget):
+            raise ValueError("Ngân sách phải là SearchBudget")
+        root = MCTSNode.root(board, player, radius=self.radius)
+        if root.is_terminal():
+            raise ValueError("Không tìm nước đi cho trạng thái đã kết thúc")
+        fallback = root.untried_actions[int(self.rng.integers(len(root.untried_actions)))]
+        stop_at = self._stop_at()
+        fixed = self.budget.mode == "fixed"
+        completed = created = 0
+        while not fixed or completed < self.budget.simulations:
+            if stop_at is not None and perf_counter() >= stop_at:
+                break
+            # 1. Lựa chọn
+            node, path = root, []
+            while not node.is_terminal() and node.is_fully_expanded():
+                node = select_child(node, self.exploration, self.rng)
+                path.append(node.action)
+            # 2. Mở rộng
+            expanded = None
+            if not node.is_terminal():
+                expanded = node.untried_actions[int(self.rng.integers(len(node.untried_actions)))]
+                node = node.expand(expanded)
+                created += 1
+            # 3. Mô phỏng
+            moves: list[Action] | None = [] if trace is not None else None
+            result = rollout(node.state, self.rng, stop_at, moves)
+            if result is None:
+                break  # hết giờ giữa rollout: bỏ mô phỏng, không cập nhật ngược
+            # 4. Cập nhật ngược
+            backpropagate(node, result)
+            completed += 1
+            if trace is not None:
+                trace({"simulation": completed, "selection_path": path, "expanded": expanded,
+                       "leaf_terminal": node.is_terminal(), "rollout_moves": moves, "result": result})
+        self.stats["simulations"] = completed
+        self.stats["nodes_visited"] = created
+        self.stats["pruned_nodes"] = 0
+        self.last_root = root
+        return root, fallback
+
+    def get_action(self, board: np.ndarray, player: int) -> Action:
+        root, fallback = self.search(board, player)
+        action = best_action(root, self.rng)
+        return fallback if action is None else action

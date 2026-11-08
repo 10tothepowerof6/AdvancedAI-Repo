@@ -7,12 +7,19 @@ Các test dài chia ba phần: Chuẩn bị (dựng thế cờ) / Thực thi (g�
 / Kiểm chứng (so với kỳ vọng). Test ngắn một hai dòng gộp chung ba phần.
 """
 
+from functools import partial
+from math import inf, log, sqrt
+
 import numpy as np
 import pytest
 
-from agents.mcts_agent import DEFAULT_RADIUS, MCTSNode, MCTSState, outcome_value
+from agents.mcts_agent import (DEFAULT_RADIUS, MCTSAgent, MCTSNode, MCTSState, backpropagate,
+                               best_action, outcome_value, rollout, select_child, uct_score)
+from agents.random_agent import RandomAgent
+from config.search_budget import SearchBudget
 from core.game_engine import CaroGame
 from core.game_utils import candidate_actions
+from evaluation.match import play_match
 
 # Quân đệm ở hàng 10, cách xa các chuỗi thắng.
 _FILL = [(10, 0), (10, 2), (10, 4), (10, 6), (10, 8)]
@@ -320,3 +327,299 @@ def test_node_requires_parent_and_action_together():
     state = MCTSState.from_board(np.zeros((11, 11), dtype=np.int8), 1)
     with pytest.raises(ValueError):
         MCTSNode(state, action=(5, 5))
+
+
+# ================================================================ GIAI ĐOẠN 2
+# ---------------------------------------------------------------- UCT và lựa chọn
+
+def test_uct_score_formula_and_unvisited_child():
+    # Chuẩn bị: cha N = 10; con a có N = 2, Q = 1 (Q/N = 0,5); con b chưa thăm.
+    root = MCTSNode.root(_small_board(), 1)
+    a, b = root.expand((4, 4)), root.expand((4, 5))
+    root.visits, a.visits, a.value = 10, 2, 1.0
+    # Thực thi và kiểm chứng: so với công thức tính tay.
+    assert uct_score(a, 10, sqrt(2)) == pytest.approx(0.5 + sqrt(2) * sqrt(log(10) / 2))
+    assert uct_score(a, 10, 0.0) == 0.5  # c = 0: chỉ còn thành phần khai thác
+    assert uct_score(b, 10, sqrt(2)) == inf  # con chưa thăm được ưu tiên tuyệt đối
+
+
+def test_select_child_uses_view_of_player_to_move_at_each_layer():
+    # Chuẩn bị: gốc đến lượt X. Tầng 1 (nước của X): a tốt cho X, b xấu cho X.
+    rng = np.random.default_rng(0)
+    root = MCTSNode.root(_small_board(), 1)
+    a, b = root.expand((4, 4)), root.expand((6, 6))
+    root.visits = 10
+    a.visits, a.value = 5, 4.0
+    b.visits, b.value = 5, -2.0
+    # Tầng 2 (nước của O, đứng ở a): g1 tốt cho O (tức xấu cho X), g2 xấu cho O.
+    g1, g2 = a.expand((3, 3)), a.expand((7, 7))
+    g1.visits, g1.value = 2, 2.0
+    g2.visits, g2.value = 2, -2.0
+    # Thực thi và kiểm chứng: mỗi tầng chọn nước tốt cho chính người đến lượt ở tầng đó.
+    assert select_child(root, sqrt(2), rng) is a
+    assert g1.player_just_moved == -1
+    assert select_child(a, sqrt(2), rng) is g1  # O không chọn nhánh có lợi cho X ở gốc
+
+
+def test_select_child_ties_are_seeded_and_unvisited_first():
+    root = MCTSNode.root(_small_board(), 1)
+    a, b = root.expand((4, 4)), root.expand((6, 6))
+    # Hai con đều chưa thăm: đồng điểm vô cực, chọn ngẫu nhiên theo seed.
+    picks = {select_child(root, sqrt(2), np.random.default_rng(s)).action for s in range(20)}
+    assert picks == {(4, 4), (6, 6)}
+    same = [select_child(root, sqrt(2), np.random.default_rng(3)).action for _ in range(3)]
+    assert len(set(same)) == 1
+    # Một con đã thăm với Q/N rất cao vẫn nhường con chưa thăm.
+    root.visits, a.visits, a.value = 1, 1, 1.0
+    assert select_child(root, sqrt(2), np.random.default_rng(0)) is b
+
+
+# ---------------------------------------------------------------- cập nhật ngược
+
+@pytest.mark.parametrize("result", [1, -1, 0], ids=["x_thang", "o_thang", "hoa"])
+def test_backpropagate_signs_by_layer(result):
+    # Chuẩn bị: gốc (đến lượt X, pjm = O) → a (X đi) → g (O đi).
+    root = MCTSNode.root(_small_board(), 1)
+    a = root.expand((4, 4))
+    g = a.expand((3, 3))
+    # Thực thi: lan truyền một kết quả từ g lên gốc.
+    backpropagate(g, result)
+    # Kiểm chứng: mọi nút N = 1; Q = result × player_just_moved (tính tay theo tầng).
+    assert (root.visits, a.visits, g.visits) == (1, 1, 1)
+    assert (root.player_just_moved, a.player_just_moved, g.player_just_moved) == (-1, 1, -1)
+    assert (root.value, a.value, g.value) == (-result, result, -result)
+    # Lan truyền từ a chỉ cập nhật a và gốc, không đụng tới g.
+    backpropagate(a, 1)
+    assert (root.visits, a.visits, g.visits) == (2, 2, 1)
+    assert (a.value, g.value) == (result + 1, -result)
+
+
+# ---------------------------------------------------------------- rollout
+
+def test_rollout_terminal_returns_result_without_moves():
+    game = CaroGame()
+    for action in SEQUENCES[0][1]:
+        game.step(action)
+    state = MCTSState.from_game(game)
+    trace = []
+    assert rollout(state, np.random.default_rng(0), trace=trace) == 1
+    assert trace == []  # trạng thái terminal không kích hoạt rollout
+
+
+@pytest.mark.parametrize("seed", range(10))
+def test_rollout_matches_engine_replay(seed):
+    # Chuẩn bị: thế cờ đang chơi (4 nước), lưu bản sao để kiểm tra rollout không sửa state.
+    start = SEQUENCES[-1][1]
+    game = CaroGame()
+    for action in start:
+        game.step(action)
+    state = MCTSState.from_game(game)
+    before = state.clone()
+    # Thực thi: rollout ghi lại các nước đã đi.
+    trace = []
+    result = rollout(state, np.random.default_rng(seed), trace=trace)
+    # Kiểm chứng: phát lại chính các nước đó trên engine (luân phiên X/O do engine quyết định)
+    # cho đúng kết quả và dừng đúng lúc kết thúc.
+    for action in trace:
+        assert not game.is_terminal()
+        game.step(action)
+    assert game.is_terminal() and game.result() == result
+    np.testing.assert_array_equal(state.board, before.board)
+    assert (state.move_count, state.current_player) == (before.move_count, before.current_player)
+
+
+def test_rollout_single_empty_cell():
+    game = CaroGame(3, 3)
+    for action in SEQUENCES[5][1][:-1]:  # hòa 3×3 thiếu nước cuối (2, 2)
+        game.step(action)
+    trace = []
+    assert rollout(MCTSState.from_game(game), np.random.default_rng(0), trace=trace) == 0
+    assert trace == [(2, 2)]
+
+
+def test_rollout_abandoned_when_time_passed():
+    state = MCTSState.from_board(_small_board(), 1)
+    trace = []
+    assert rollout(state, np.random.default_rng(0), stop_at=0.0, trace=trace) is None
+    assert trace == []
+
+
+# ---------------------------------------------------------------- quyết định cuối
+
+def test_best_action_by_visits_then_value_then_seed():
+    root = MCTSNode.root(_small_board(), 1)
+    assert best_action(root, np.random.default_rng(0)) is None  # chưa có con được thăm
+    a, b, c = root.expand((4, 4)), root.expand((4, 5)), root.expand((6, 6))
+    a.visits, a.value = 5, 1.0
+    b.visits, b.value = 5, 3.0
+    c.visits, c.value = 3, 3.0
+    assert best_action(root, np.random.default_rng(0)) == (4, 5)  # cùng N lớn nhất, Q/N cao hơn
+    b.value = 1.0  # a và b đồng cả N lẫn Q/N
+    picks = {best_action(root, np.random.default_rng(s)) for s in range(20)}
+    assert picks == {(4, 4), (4, 5)}
+
+
+# ---------------------------------------------------------------- tác tử
+
+def _position(moves):
+    game = CaroGame()
+    for action in moves:
+        game.step(action)
+    return game
+
+
+def _count_nodes(node):
+    return 1 + sum(_count_nodes(child) for child in node.children.values())
+
+
+@pytest.mark.parametrize("simulations", [1, 7, 64])
+def test_fixed_budget_runs_exact_simulations(simulations):
+    game = _position(SEQUENCES[-1][1])
+    agent = MCTSAgent(seed=0, budget=SearchBudget(simulations=simulations))
+    agent.choose_action(game.board, game.current_player)
+    root = agent.last_root
+    assert agent.stats["simulations"] == simulations
+    assert root.visits == simulations
+    assert sum(child.visits for child in root.children.values()) == simulations
+    assert agent.stats["nodes_visited"] == _count_nodes(root) - 1
+    assert agent.stats["pruned_nodes"] == 0
+
+
+def test_stats_reset_each_turn_and_budget_read_at_call_time():
+    game = _position(SEQUENCES[-1][1])
+    agent = MCTSAgent(seed=0)  # mặc định 1.000; runner gán lại budget sau khi tạo agent
+    agent.budget = SearchBudget(simulations=5)
+    agent.choose_action(game.board, game.current_player)
+    agent.budget = SearchBudget(simulations=9)
+    agent.choose_action(game.board, game.current_player)
+    assert agent.stats["simulations"] == 9  # không cộng dồn 5 + 9
+
+
+def test_same_seed_and_fixed_budget_reproducible():
+    game = _position(SEQUENCES[-1][1])
+    runs = []
+    for _ in range(2):
+        agent = MCTSAgent(seed=7, budget=SearchBudget(simulations=200))
+        actions = [agent.choose_action(game.board, game.current_player) for _ in range(3)]
+        visits = {a: c.visits for a, c in agent.last_root.children.items()}
+        runs.append((actions, visits, agent.stats["nodes_visited"]))
+    assert runs[0] == runs[1]
+
+
+def _near_full_board():
+    # Bàn 11×11 kín, không có chuỗi 5; chừa trống đúng ô (10, 10).
+    board = np.array([[1 if (r + 2 * c) % 4 < 2 else -1 for c in range(11)] for r in range(11)],
+                     dtype=np.int8)
+    board[10, 10] = 0
+    return board
+
+
+@pytest.mark.parametrize("budget", [SearchBudget(simulations=5), SearchBudget(mode="time", time_limit_s=0.5)],
+                         ids=["fixed", "time"])
+def test_single_legal_cell_is_returned(budget):
+    board = _near_full_board()
+    assert MCTSState.from_board(board, -1).result() is None  # điều kiện: chưa ai thắng
+    agent = MCTSAgent(seed=0, budget=budget)
+    assert agent.choose_action(board, -1) == (10, 10)
+
+
+def test_output_legal_and_input_board_unchanged():
+    agent = MCTSAgent(seed=1, budget=SearchBudget(simulations=50))
+    moves = SEQUENCES[0][1]
+    for ply in range(len(moves)):  # mọi tiền tố chưa kết thúc của ván x_thang_ngang
+        game = _position(moves[:ply])
+        original = game.board.copy()
+        action = agent.choose_action(game.board, game.current_player)
+        np.testing.assert_array_equal(game.board, original)
+        assert action in game.legal_actions()
+        assert all(type(x) is int for x in action)
+
+
+def test_search_rejects_terminal_board():
+    board = np.zeros((11, 11), dtype=np.int8)
+    board[0, :5] = 1
+    with pytest.raises(ValueError, match="kết thúc"):
+        MCTSAgent(seed=0, budget=SearchBudget(simulations=5)).choose_action(board, -1)
+
+
+def test_invalid_budget_rejected_at_call_time():
+    # Gọi search() trực tiếp: BaseAgent.choose_action (file chung) đọc budget.mode trước
+    # khi tới MCTS nên với budget sai kiểu sẽ báo AttributeError ở tầng chung.
+    agent = MCTSAgent(seed=0)
+    agent.budget = "fixed"  # bị gán sai kiểu sau khi tạo
+    with pytest.raises(ValueError, match="SearchBudget"):
+        agent.search(_small_board(), 1)
+
+
+@pytest.mark.parametrize("kwargs", [{"exploration": -1}, {"exploration": float("nan")},
+                                    {"exploration": True}, {"radius": 0}, {"radius": 1.5},
+                                    {"time_margin_s": -0.1}, {"time_margin_s": float("inf")},
+                                    {"budget": "fixed"}],
+                         ids=["c_am", "c_nan", "c_bool", "ban_kinh_0", "ban_kinh_so_thuc",
+                              "bien_am", "bien_vo_cuc", "budget_sai_kieu"])
+def test_invalid_constructor_arguments(kwargs):
+    with pytest.raises(ValueError):
+        MCTSAgent(seed=0, **kwargs)
+
+
+def test_time_mode_stops_before_deadline_and_counts_completed_only():
+    agent = MCTSAgent(seed=0, budget=SearchBudget(mode="time", time_limit_s=0.3))
+    game = _position(SEQUENCES[-1][1])
+    agent.choose_action(game.board, game.current_player)
+    assert agent.stats["thinking_time"] < 0.3  # dừng hợp tác trước hạn
+    assert agent.stats["simulations"] > 0
+    assert agent.last_root.visits == agent.stats["simulations"]  # chỉ đếm mô phỏng hoàn thành
+
+
+def test_time_mode_fallback_when_no_simulation_completes(monkeypatch):
+    # Đồng hồ của module MCTS luôn báo đã quá mốc dừng: không mô phỏng nào kịp chạy.
+    monkeypatch.setattr("agents.mcts_agent.perf_counter", lambda: float("inf"))
+    agent = MCTSAgent(seed=0, budget=SearchBudget(mode="time"))
+    board = _small_board()
+    action = agent.choose_action(board, 1)
+    assert agent.stats["simulations"] == 0 and agent.last_root.children == {}
+    assert action in candidate_actions(board, DEFAULT_RADIUS)  # nước dự phòng hợp lệ
+
+
+def test_trace_replays_four_steps_on_engine():
+    # Mỗi mô phỏng: đường lựa chọn + nước mở rộng + các nước rollout, phát lại trên engine
+    # từ thế gốc phải cho đúng kết quả đã lan truyền ngược.
+    start = SEQUENCES[-1][1]
+    game = _position(start)
+    records = []
+    agent = MCTSAgent(seed=3, budget=SearchBudget(simulations=40))
+    agent.search(game.board, game.current_player, trace=records.append)
+    assert [r["simulation"] for r in records] == list(range(1, 41))
+    for record in records:
+        replay = _position(start)
+        moves = list(record["selection_path"])
+        if record["expanded"] is not None:
+            moves.append(record["expanded"])
+        for action in moves + record["rollout_moves"]:
+            replay.step(action)
+        assert replay.is_terminal() and replay.result() == record["result"]
+
+
+def test_full_game_against_random():
+    game = CaroGame()
+    agents = {1: MCTSAgent(seed=0, budget=SearchBudget(simulations=20)), -1: RandomAgent(seed=1)}
+    while not game.is_terminal():
+        original = game.board.copy()
+        agent = agents[game.current_player]
+        action = agent.choose_action(game.board, game.current_player)
+        np.testing.assert_array_equal(game.board, original)
+        if isinstance(agent, MCTSAgent):
+            assert agent.stats["simulations"] == 20
+        game.step(action)
+    assert game.result() in (-1, 0, 1)
+
+
+def test_play_match_runner_with_fixed_budget():
+    # Runner chạy agent ở tiến trình riêng và gán budget sau khi tạo agent.
+    record, logs = play_match(partial(MCTSAgent, seed=1), partial(RandomAgent, seed=2),
+                              agent_x="MCTS", agent_o="Ngẫu nhiên",
+                              budget=SearchBudget(simulations=15))
+    assert record.reason == "completed"
+    mcts_logs = [log for log in logs if log["player"] == 1]
+    assert mcts_logs and all(log["status"] == "move" for log in mcts_logs)
+    assert all(log["stats"]["simulations"] == 15 for log in mcts_logs)

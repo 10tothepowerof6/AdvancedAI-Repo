@@ -443,4 +443,56 @@ không sao chép trạng thái): mỗi lỗi đều làm test thất bại, sau 
 - `from_board` không kiểm tra tính nhất quán giữa số quân và lượt đi.
 - `step()` dùng vòng lặp Python trên mảng NumPy; tốc độ rollout sẽ được đo và tối ưu ở Giai đoạn 2.
 
-*Trạng thái tài liệu: Giai đoạn 1 đã cài đặt và kiểm thử cục bộ; Giai đoạn 2–3 chưa thực hiện.*
+*Giai đoạn 1 đã merge qua PR #15 (07/11/2026).*
+
+### Giai đoạn 2 — Tìm kiếm UCT và agent (nhánh `feature/mcts-uct`, 08/11/2026)
+
+**Quyết định thiết kế** (trong `agents/mcts_agent.py`):
+- **Bốn bước, mỗi bước một hàm kiểm thử độc lập:**
+  - *Lựa chọn* — `select_child`, `uct_score`: UCT = Q/N + c·√(ln N_cha / N_con); con chưa thăm có điểm vô cực;
+    đồng điểm chọn ngẫu nhiên theo seed. Dừng tại nút terminal hoặc nút còn nước chưa mở rộng.
+    Vì Q của con lưu theo góc nhìn `player_just_moved`, ở tầng của O, O chọn nhánh tốt cho O (không theo lợi ích của X ở gốc).
+  - *Mở rộng* — `MCTSNode.expand`: thêm đúng một con, nước chưa thử chọn ngẫu nhiên theo seed; bỏ qua nếu terminal.
+  - *Mô phỏng* — `rollout`: hai bên luân phiên, mỗi nước ngẫu nhiên đều trên các ô trống (tương đương một hoán vị ngẫu nhiên
+    của ô trống), tới khi có chuỗi ≥ 5 hoặc bàn đầy. **Không cắt ngắn theo độ sâu.** Nút terminal trả thẳng kết quả,
+    không rollout. Chạy trên bản sao dạng list nên không sửa trạng thái gốc.
+  - *Cập nhật ngược* — `backpropagate`: từ nút mới lên gốc, N += 1, Q += `outcome_value(kết quả, player_just_moved)`.
+- **Quyết định cuối** — `best_action`: con có N lớn nhất; đồng N thì Q/N cao hơn; vẫn đồng thì ngẫu nhiên theo seed.
+  Tách biệt với việc chọn nhánh bằng UCT khi tìm kiếm.
+- **Ngân sách** (đọc từ `self.budget` mỗi lượt vì runner gán lại budget sau khi tạo agent):
+  `fixed` chạy đúng `simulations` mô phỏng hoàn thành; `time` dừng hợp tác ở `deadline − min(0,1 s; 0,5 × time_limit_s)`
+  và kiểm tra đồng hồ cả trong rollout (mỗi 8 nước). Mô phỏng bị bỏ dở vì hết giờ không được đếm, không cập nhật ngược.
+  Luôn có nước dự phòng (một ứng viên chọn theo seed) nếu chưa hoàn thành mô phỏng nào. `budget` sai kiểu → `ValueError`
+  trong `search()`; tham số `exploration`, `radius`, `time_margin_s` không hợp lệ → `ValueError` khi khởi tạo.
+- **Thống kê mỗi lượt:** `simulations` = mô phỏng hoàn thành; `nodes_visited` = số nút mới tạo; `pruned_nodes` = 0.
+- Cây dựng mới mỗi lượt, không tái sử dụng. `search(..., trace=...)` cho notebook quan sát bốn bước mà không cài lại thuật toán.
+
+**Kiểm thử:**
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_mcts_agent.py -v   # 105 passed, 0 failed (62 GĐ1 + 43 GĐ2)
+.\.venv\Scripts\python.exe -m pytest tests -v                      # 357 passed, 0 failed
+```
+Nhóm test Giai đoạn 2: công thức UCT tính tay; lựa chọn đúng góc nhìn ở tầng X và tầng O; đồng điểm và con chưa thăm;
+lan truyền ngược với X thắng / O thắng / hòa (dấu theo từng tầng); rollout từ terminal không đi nước nào; rollout phát lại
+trên engine cho đúng kết quả (10 seed); rollout một ô trống; rollout bị bỏ khi quá giờ; quyết định cuối và phá hòa;
+ngân sách fixed 1 / 7 / 64 chạy đúng số mô phỏng; thống kê reset mỗi lượt; tái lập theo seed; một ô hợp lệ (fixed và time);
+đầu ra hợp lệ và bàn cờ gốc nguyên vẹn; tham số và ngân sách không hợp lệ; chế độ time dừng trước hạn và chỉ đếm mô phỏng
+hoàn thành; nước dự phòng khi không kịp mô phỏng; phát lại toàn bộ bốn bước của 40 mô phỏng trên engine; ván hoàn chỉnh
+với `RandomAgent`; ván qua runner `play_match` với ngân sách fixed.
+Đã cố ý cài 7 lỗi (sai dấu lan truyền ngược, đối thủ chọn nhánh có lợi cho gốc, rollout không luân phiên, thừa một mô phỏng,
+chọn theo Q/N thay vì N, đếm mô phỏng bị bỏ, rollout từ trạng thái terminal): mỗi lỗi đều làm test thất bại.
+
+**Notebook:** hoàn thiện mục 5–6 của `notebooks/03_mcts.ipynb` (seed 42, 20 seed cho mục 6, chạy từ kernel mới).
+- 1.000 mô phỏng `fixed` mất khoảng 0,2 giây/nước trên máy ghi ở Giai đoạn 0.
+- Tỷ lệ chọn đúng (20 seed, 100 / 500 / 1.000 mô phỏng): thắng ngay 1 / 19 / 20; chặn bốn 0 / 1 / 7;
+  thắng trước khi chặn 4 / 20 / 20.
+
+**Hạn chế đã biết:**
+- Rollout ngẫu nhiên đều yếu trong việc **chặn** đe dọa: chặn bốn chỉ đúng 7/20 seed ở 1.000 mô phỏng.
+- Cây nông: ở thế cờ quan sát (40 ứng viên), trong 1.000 mô phỏng chỉ 12 lần lựa chọn xuống tới độ sâu 2.
+- c = √2 là điểm xuất phát (phần thưởng trong [−1, 1]), chưa hiệu chỉnh; ảnh hưởng của c tới chất lượng nước chưa đo.
+- Agent dùng độ dài thắng 5 của dự án nên không chạy trên bàn nhỏ hơn 5×5.
+- Với `budget` sai kiểu, `BaseAgent.choose_action` (file chung) báo `AttributeError` trước khi tới MCTS;
+  kiểm tra `ValueError` của MCTS chỉ có hiệu lực khi gọi `search()` trực tiếp.
+
+*Trạng thái tài liệu: Giai đoạn 1–2 đã cài đặt và kiểm thử cục bộ; Giai đoạn 3 chưa thực hiện.*
