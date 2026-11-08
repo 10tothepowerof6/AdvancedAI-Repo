@@ -13,12 +13,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+from math import isfinite
 from numbers import Integral
+from time import perf_counter
 from typing import Callable
 
 import numpy as np
 
+from agents.base_agent import BaseAgent
 from config.game_config import BOARD_SIZE, EMPTY, WIN_LENGTH
+from config.search_budget import SearchBudget
 from core.game_engine import Action
 from core.game_utils import candidate_actions
 
@@ -319,6 +323,7 @@ def evaluate(state: SearchState, perspective: int, *,
 
 # Giá trị vô cực dạng số nguyên, lớn hơn mọi điểm terminal.
 _INF = WIN_SCORE * 10
+DEFAULT_TIME_MARGIN_S = 0.1
 
 
 class SearchTimeout(Exception):
@@ -472,4 +477,87 @@ class MinimaxSearcher:
                 if index < len(children) - 1:
                     self.pruned_nodes += 1
                 break
+        return best
+
+
+# Tác tử
+
+class MinimaxAgent(BaseAgent):
+    """Tác tử Minimax/Alpha-Beta theo hợp đồng BaseAgent.
+
+    - Chế độ fixed: tìm đúng budget.depth ply.
+    - Chế độ time: Iterative Deepening từ độ sâu 1, dừng chủ động trước deadline
+      time_margin_s giây và trả nước của độ sâu đã hoàn tất gần nhất. Nước dự
+      phòng (ứng viên đầu tiên) luôn sẵn sàng nếu chưa xong độ sâu 1.
+    - stats ngoài các khóa chung còn có depth_reached và root_value của lượt đi.
+    """
+
+    def __init__(self, *, budget: SearchBudget | None = None, use_alpha_beta: bool = True,
+                 move_ordering: bool = True, radius: int = 2,
+                 weights: tuple[int, ...] | None = None,
+                 time_margin_s: float = DEFAULT_TIME_MARGIN_S, name: str | None = None):
+        if name is None:
+            name = "Minimax Alpha-Beta" if use_alpha_beta else "Minimax"
+        super().__init__(name, budget=budget)
+        if (isinstance(time_margin_s, bool) or not isinstance(time_margin_s, (int, float))
+                or not isfinite(time_margin_s) or time_margin_s < 0):
+            raise ValueError("Biên an toàn thời gian phải là số hữu hạn không âm")
+        self.time_margin_s = float(time_margin_s)
+        self.searcher = MinimaxSearcher(use_alpha_beta=use_alpha_beta, move_ordering=move_ordering,
+                                        radius=radius, weights=weights)
+        # Tác tử luôn chơi luật của engine nên trọng số sai báo lỗi ngay khi tạo tác tử.
+        self.searcher.weights_for(SearchState.initial())
+        self.last_result: SearchResult | None = None
+
+    def get_action(self, board: np.ndarray, player: int) -> Action:
+        state = SearchState(board, player)
+        self.last_result = None
+        self.stats.update(depth_reached=0, root_value=None)
+        candidates = state.candidates(self.searcher.radius)
+        if not candidates:
+            # Chỉ xảy ra khi bên gọi vi phạm hợp đồng (ván đã kết thúc); vẫn trả nước hợp lệ.
+            row, col = np.argwhere(state.board == EMPTY)[0]
+            return int(row), int(col)
+        fallback = candidates[0]
+
+        if self.budget.mode == "fixed":
+            self.searcher.should_stop = None
+            self.last_result = self.searcher.search(state, self.budget.depth)
+            self._record(self.last_result)
+        else:
+            self.last_result = self._iterative_deepening(state)
+
+        if self.last_result is None or self.last_result.action is None:
+            return fallback
+        self.stats.update(depth_reached=self.last_result.depth, root_value=self.last_result.value)
+        return self.last_result.action
+
+    def _record(self, counters: SearchResult | MinimaxSearcher) -> None:
+        self.stats["nodes_visited"] += counters.nodes_visited
+        self.stats["pruned_nodes"] += counters.pruned_nodes
+
+    def _iterative_deepening(self, state: SearchState) -> SearchResult | None:
+        if self.deadline is None:
+            raise ValueError("Chế độ time cần gọi qua choose_action() để có deadline")
+        soft_deadline = self.deadline - self.time_margin_s
+        self.searcher.should_stop = lambda: perf_counter() >= soft_deadline
+        best: SearchResult | None = None
+        max_depth = int(np.count_nonzero(state.board == EMPTY))
+        try:
+            for depth in range(1, max_depth + 1):
+                if self.searcher.should_stop is not None and self.searcher.should_stop():
+                    break
+                try:
+                    result = self.searcher.search(
+                        state, depth, first_action=best.action if best else None)
+                except SearchTimeout:
+                    self._record(self.searcher)
+                    break
+                self._record(result)
+                best = result
+                # Đã chứng minh thắng/thua chắc chắn trong tầm nhìn: tìm sâu hơn không đổi kết quả.
+                if abs(result.value) >= WIN_SCORE - max_depth:
+                    break
+        finally:
+            self.searcher.should_stop = None
         return best
