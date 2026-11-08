@@ -469,8 +469,8 @@ không sao chép trạng thái): mỗi lỗi đều làm test thất bại, sau 
 
 **Kiểm thử:**
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_mcts_agent.py -v   # 105 passed, 0 failed (62 GĐ1 + 43 GĐ2)
-.\.venv\Scripts\python.exe -m pytest tests -v                      # 357 passed, 0 failed
+.\.venv\Scripts\python.exe -m pytest tests/test_mcts_agent.py -v   # 108 passed, 0 failed (62 GĐ1 + 46 GĐ2)
+.\.venv\Scripts\python.exe -m pytest tests -v                      # 360 passed, 0 failed
 ```
 Nhóm test Giai đoạn 2: công thức UCT tính tay; lựa chọn đúng góc nhìn ở tầng X và tầng O; đồng điểm và con chưa thăm;
 lan truyền ngược với X thắng / O thắng / hòa (dấu theo từng tầng); rollout từ terminal không đi nước nào; rollout phát lại
@@ -481,6 +481,15 @@ hoàn thành; nước dự phòng khi không kịp mô phỏng; phát lại toà
 với `RandomAgent`; ván qua runner `play_match` với ngân sách fixed.
 Đã cố ý cài 7 lỗi (sai dấu lan truyền ngược, đối thủ chọn nhánh có lợi cho gốc, rollout không luân phiên, thừa một mô phỏng,
 chọn theo Q/N thay vì N, đếm mô phỏng bị bỏ, rollout từ trạng thái terminal): mỗi lỗi đều làm test thất bại.
+
+**Sửa theo review PR #18:**
+- Gọi `search()` trực tiếp ở chế độ time trước đây dùng `self.deadline`: nếu là `None` thì vòng tìm kiếm không có điều kiện
+  dừng (lặp vô hạn); nếu là mốc cũ của lượt trước thì dừng ngay với 0 mô phỏng. Nay `search()` tự đặt deadline cho lần gọi
+  (thời điểm gọi + `time_limit_s`); `get_action` dùng deadline do `choose_action` đặt qua `_search()`; `_stop_at()` báo
+  `ValueError` nếu chế độ time thiếu deadline thay vì chạy vô hạn.
+- Test bằng đồng hồ giả, chạy trong luồng có giới hạn chờ 10 giây để lỗi lặp vô hạn hiện thành thất bại thay vì treo:
+  `test_direct_search_in_time_mode_sets_its_own_deadline` (deadline `None` và deadline cũ đã qua),
+  `test_internal_search_without_deadline_in_time_mode_raises`. Mã trước khi sửa làm cả 3 trường hợp thất bại.
 
 **Notebook:** hoàn thiện mục 5–6 của `notebooks/03_mcts.ipynb` (seed 42, 20 seed cho mục 6, chạy từ kernel mới).
 - 1.000 mô phỏng `fixed` mất khoảng 0,2 giây/nước trên máy ghi ở Giai đoạn 0.
