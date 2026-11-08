@@ -10,6 +10,7 @@ import pytest
 from agents.minimax_agent import (
     WIN_SCORE,
     WINDOW_WEIGHTS,
+    MinimaxAgent,
     MinimaxSearcher,
     SearchState,
     default_weights,
@@ -21,6 +22,7 @@ from agents.minimax_agent import (
     window_counts,
 )
 from agents.random_agent import RandomAgent
+from config.search_budget import SearchBudget
 from core.game_engine import CaroGame
 from core.game_utils import candidate_actions
 
@@ -826,12 +828,14 @@ def test_searcher_rejects_invalid_config(kwargs):
 
 
 @pytest.mark.parametrize("weights", [(1, 2), (0, 1, 10, 100, 1000, -1), (0, 1_000_000, 0, 0, 0, 0)])
-def test_invalid_weights_rejected_by_search(weights):
+def test_invalid_weights_rejected_by_search_and_agent(weights):
     # Arrange
     searcher = MinimaxSearcher(weights=weights)
-    # Act + Assert: searcher biết luật thắng khi nhận trạng thái
+    # Act + Assert: searcher biết luật thắng khi nhận trạng thái; tác tử luôn chơi luật engine
     with pytest.raises(ValueError):
         searcher.search(SearchState.initial().apply((5, 5)), 1)
+    with pytest.raises(ValueError):
+        MinimaxAgent(weights=weights)
 
 
 def test_search_requires_margin_for_ply_adjusted_wins():
@@ -879,3 +883,114 @@ def test_search_rejects_invalid_depth_and_terminal_state():
     terminal = _state_after(FIXTURES["X-ngang-5"][0])
     with pytest.raises(ValueError):
         searcher.search(terminal, 1)
+
+
+# Tác tử MinimaxAgent
+
+@pytest.mark.parametrize("ab", [False, True])
+def test_agent_fixed_mode_contract(ab):
+    # Arrange
+    game = _random_board(seed=2, n_moves=10)
+    board = game.board.copy()
+    agent = MinimaxAgent(budget=SearchBudget(mode="fixed", depth=2), use_alpha_beta=ab)
+    # Act
+    action = agent.choose_action(board, game.current_player)
+    # Assert
+    np.testing.assert_array_equal(board, game.board)
+    assert action in game.legal_actions()
+    assert agent.stats["depth_reached"] == 2
+    assert agent.stats["nodes_visited"] == agent.last_result.nodes_visited > 0
+    assert agent.stats["root_value"] == agent.last_result.value
+    if not ab:
+        assert agent.stats["pruned_nodes"] == 0
+
+
+def test_agent_stats_reset_each_turn():
+    # Arrange
+    game = _random_board(seed=1, n_moves=8)
+    agent = MinimaxAgent(budget=SearchBudget(depth=2))
+    # Act
+    agent.choose_action(game.board, game.current_player)
+    first = dict(agent.stats)
+    agent.choose_action(game.board, game.current_player)
+    # Assert: cùng bàn cờ nên số liệu lượt sau bằng lượt trước, không cộng dồn
+    assert agent.stats["nodes_visited"] == first["nodes_visited"]
+    assert agent.stats["pruned_nodes"] == first["pruned_nodes"]
+
+
+def test_agent_names_distinguish_variants():
+    assert MinimaxAgent().name != MinimaxAgent(use_alpha_beta=False).name
+
+
+@pytest.mark.parametrize("name", ["X-thắng-ngay", "O-chặn"])
+def test_agent_plays_tactics(name):
+    moves, expected = TACTICS[name]
+    game = _game_after(moves)
+    agent = MinimaxAgent(budget=SearchBudget(depth=2))
+    assert agent.choose_action(game.board, game.current_player) in expected
+
+
+@pytest.mark.parametrize("depth,seed", [(1, 0), (1, 1), (2, 2)])
+def test_agent_completes_game_against_random(depth, seed):
+    # Arrange
+    game = CaroGame()
+    minimax_side = X if seed % 2 == 0 else O
+    agents = {minimax_side: MinimaxAgent(budget=SearchBudget(depth=depth)),
+              -minimax_side: RandomAgent(seed)}
+    # Act + Assert: mọi nước hợp lệ, bàn cờ engine không bị agent sửa
+    while not game.is_terminal():
+        original = game.board.copy()
+        action = agents[game.current_player].choose_action(game.board, game.current_player)
+        np.testing.assert_array_equal(game.board, original)
+        assert action in game.legal_actions()
+        game.step(action)
+    assert game.result() in (-1, 0, 1)
+
+
+def test_agent_time_mode_iterative_deepening():
+    # Arrange
+    game = _random_board(seed=5, n_moves=12)
+    agent = MinimaxAgent(budget=SearchBudget(mode="time", time_limit_s=0.6))
+    state = SearchState(game.board, game.current_player)
+    # Act
+    action = agent.choose_action(game.board, game.current_player)
+    # Assert: giá trị bằng đúng một lần tìm kiếm cố định ở độ sâu đã hoàn tất
+    depth = agent.stats["depth_reached"]
+    assert depth >= 1
+    assert action in game.legal_actions()
+    assert agent.stats["root_value"] == MinimaxSearcher().search(state, depth).value
+
+
+def test_agent_time_mode_fallback_when_no_time():
+    # Arrange: hạn 0,05 giây nhỏ hơn biên an toàn 0,1 giây nên chưa xong độ sâu nào
+    game = _random_board(seed=6, n_moves=10)
+    agent = MinimaxAgent(budget=SearchBudget(mode="time", time_limit_s=0.05))
+    # Act
+    action = agent.choose_action(game.board, game.current_player)
+    # Assert
+    assert agent.stats["depth_reached"] == 0
+    assert action == candidate_actions(game.board)[0]
+
+
+def test_agent_time_mode_stops_after_proven_win():
+    # Arrange
+    moves, winning = TACTICS["X-thắng-ngay"]
+    game = _game_after(moves)
+    agent = MinimaxAgent(budget=SearchBudget(mode="time", time_limit_s=2.0))
+    # Act
+    action = agent.choose_action(game.board, game.current_player)
+    # Assert: độ sâu 1 đã chứng minh thắng nên không tìm tiếp
+    assert action in winning
+    assert agent.stats["depth_reached"] == 1
+
+
+def test_agent_time_mode_requires_deadline():
+    agent = MinimaxAgent(budget=SearchBudget(mode="time"))
+    with pytest.raises(ValueError):
+        agent.get_action(np.zeros((11, 11), dtype=np.int8), X)
+
+
+@pytest.mark.parametrize("margin", [-0.1, float("nan"), True])
+def test_agent_rejects_invalid_time_margin(margin):
+    with pytest.raises(ValueError):
+        MinimaxAgent(time_margin_s=margin)
