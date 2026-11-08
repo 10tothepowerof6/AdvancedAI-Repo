@@ -385,7 +385,7 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 ### Trạng thái: Hoàn thành (chờ merge)
 
 ### Quyết định thiết kế chính
-- **Fixture test dùng numpy trực tiếp** (không qua `CaroGame.step()`) để kiểm soát chính xác số quân mỗi bên mà không bị ràng buộc bởi thứ tự đặt quân.
+- **Fixture kiểm thử hành vi tác tử dùng CaroGame.step() (`_build_board`)** để đảm bảo số quân và trạng thái bàn cờ đồng bộ chặt chẽ với luật Engine; kết hợp hàm tạo mảng numpy trực tiếp (`_board_from_stones`) cho các bài unit test hàm toán học cấp thấp.
 - **Tie-breaking tất định** (`seed=None`): ưu tiên `positional_score` cao → khoảng cách Manhattan tới tâm nhỏ nhất → tọa độ `(row, col)` nhỏ nhất.
 - **Quét toàn bàn** cho `win_now` và `block_urgent` (không giới hạn bán kính) để không bỏ sót cơ hội thắng/đe dọa thua.
 - **Tập ứng viên bán kính 2** chỉ áp dụng cho tầng `positional_fallback`.
@@ -403,6 +403,6 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 - Bán kính ứng viên fallback = 2 có thể bỏ sót vị trí chiến lược xa quân cờ hiện có.
 
 ### Kết quả kiểm thử
-- `tests/test_rule_based_agent.py`: **44/44 PASSED** (100%)
-- `pytest tests -v` (toàn dự án): **126/126 PASSED**
+- `tests/test_rule_based_agent.py`: **48/48 PASSED** (100%)
+- `pytest tests -v` (toàn dự án): **130/130 PASSED**
 - Không làm gãy bất kỳ bài test nền tảng nào.

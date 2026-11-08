@@ -17,6 +17,7 @@ from agents.rule_based_agent import (
     RuleBasedAgent,
     find_winning_actions,
     is_winning_move,
+    positional_score,
 )
 from config.game_config import EMPTY, PLAYER_O, PLAYER_X
 from core.game_engine import CaroGame
@@ -154,6 +155,72 @@ class TestIsWinningMove:
 
 
 # ===========================================================================
+# PHẦN 1B — positional_score và find_winning_actions: kiểm tra hàm hỗ trợ
+# ===========================================================================
+
+class TestPositionalScoreAndHelpers:
+    """Kiểm tra độc lập hàm positional_score và find_winning_actions."""
+
+    def test_positional_score_uu_tien_tam(self):
+        """Trên bàn trống, điểm tại tâm (5, 5) > điểm tại (3, 3) > điểm tại góc (0, 0)."""
+        # Arrange
+        board = np.zeros((11, 11), dtype=np.int8)
+
+        # Act
+        score_center = positional_score(board, 5, 5, PLAYER_X)
+        score_mid = positional_score(board, 3, 3, PLAYER_X)
+        score_corner = positional_score(board, 0, 0, PLAYER_X)
+
+        # Assert
+        assert score_center > score_mid > score_corner, (
+            f"Điểm vị trí phải giảm dần từ tâm ra góc: "
+            f"{score_center} > {score_mid} > {score_corner}"
+        )
+
+    def test_positional_score_adjacency_bonus(self):
+        """Khi có quân đồng minh tại (5, 5), ô kề sát bán kính 1 là (5, 6) có điểm cao hơn ô cách xa (5, 8)."""
+        # Arrange
+        board = _build_board([(5, 5)], [])
+
+        # Act
+        score_adj = positional_score(board, 5, 6, PLAYER_X)
+        score_far = positional_score(board, 5, 8, PLAYER_X)
+
+        # Assert
+        assert score_adj > score_far, (
+            f"Ô kề sát đồng minh (5,6) phải có điểm cao hơn (5,8): "
+            f"{score_adj} > {score_far}"
+        )
+
+    def test_find_winning_actions_hai_dau_mo(self):
+        """Chuỗi 4 quân [(5, 1), (5, 2), (5, 3), (5, 4)] trả về đúng [(5, 0), (5, 5)]."""
+        # Arrange
+        board = _build_board(
+            [(5, 1), (5, 2), (5, 3), (5, 4)],
+            [(0, 0), (0, 2), (0, 4), (0, 6)],
+        )
+
+        # Act
+        win_actions = find_winning_actions(board, PLAYER_X)
+
+        # Assert
+        assert win_actions == [(5, 0), (5, 5)], (
+            f"Chuỗi 4 hai đầu mở phải trả về [(5, 0), (5, 5)], nhận {win_actions}"
+        )
+
+    def test_find_winning_actions_khong_co_nuoc_thang(self):
+        """Khi mới có 2 quân, trả về danh sách rỗng []."""
+        # Arrange
+        board = _build_board([(5, 5), (5, 6)], [(0, 0), (0, 2)])
+
+        # Act
+        win_actions = find_winning_actions(board, PLAYER_X)
+
+        # Assert
+        assert win_actions == [], f"Khi mới có 2 quân phải trả về [], nhận {win_actions}"
+
+
+# ===========================================================================
 # PHẦN 2 — Thắng ngay (win_now): agent chọn nước thắng
 # ===========================================================================
 
@@ -162,10 +229,10 @@ class TestWinNow:
 
     def test_thang_ngang_x(self):
         """X có 4 quân ngang hàng 5, cột 1–4; nước thắng tại (5,0) hoặc (5,5)."""
-        # Arrange: X có 4 quân ngang; O phân tán, không đe dọa và không tạo thắng X
-        board = _board_from_stones(
+        # Arrange: đến lượt X -> len(moves_x) == len(moves_o) == 4
+        board = _build_board(
             [(5, 1), (5, 2), (5, 3), (5, 4)],  # X: 4 quân ngang
-            [(0, 0), (0, 2), (0, 4)],           # O: phân tán
+            [(0, 0), (0, 2), (0, 4), (0, 6)],  # O: 4 quân phân tán
         )
         agent = RuleBasedAgent()
 
@@ -180,10 +247,10 @@ class TestWinNow:
 
     def test_thang_ngang_o(self):
         """O có 4 quân ngang; không có nước thắng ngay cho X."""
-        # Arrange: O có 4 quân ngang hàng 7; X phân tán không thắng
-        board = _board_from_stones(
-            [(0, 0), (1, 1), (2, 2)],           # X: phân tán, không tạo chuỗi
-            [(7, 1), (7, 2), (7, 3), (7, 4)],   # O: 4 quân ngang
+        # Arrange: đến lượt O -> len(moves_x) == len(moves_o) + 1 (5 và 4)
+        board = _build_board(
+            [(0, 0), (0, 2), (0, 4), (2, 0), (2, 2)],  # X: 5 quân phân tán
+            [(7, 1), (7, 2), (7, 3), (7, 4)],          # O: 4 quân ngang
         )
         agent = RuleBasedAgent()
 
@@ -198,10 +265,10 @@ class TestWinNow:
 
     def test_thang_doc_x(self):
         """X có 4 quân dọc cột 5 hàng 0–3, nước thắng tại (4,5)."""
-        # Arrange
-        board = _board_from_stones(
+        # Arrange: đến lượt X -> len(moves_x) == len(moves_o) == 4
+        board = _build_board(
             [(0, 5), (1, 5), (2, 5), (3, 5)],
-            [(0, 0), (0, 2), (0, 4)],
+            [(0, 0), (0, 2), (0, 4), (0, 6)],
         )
         agent = RuleBasedAgent()
 
@@ -215,9 +282,9 @@ class TestWinNow:
 
     def test_thang_doc_o(self):
         """O có 4 quân dọc cột 3, hàng 1–4; thắng tại (0,3) hoặc (5,3)."""
-        # Arrange
-        board = _board_from_stones(
-            [(0, 0), (1, 1), (2, 2)],
+        # Arrange: đến lượt O -> len(moves_x) == len(moves_o) + 1 (5 và 4)
+        board = _build_board(
+            [(0, 0), (0, 2), (0, 4), (2, 0), (2, 2)],
             [(1, 3), (2, 3), (3, 3), (4, 3)],
         )
         agent = RuleBasedAgent()
@@ -232,10 +299,10 @@ class TestWinNow:
 
     def test_thang_cheo_chinh_x(self):
         """X có 4 quân chéo chính (0,0)–(3,3), thắng tại (4,4)."""
-        # Arrange
-        board = _board_from_stones(
+        # Arrange: đến lượt X -> len(moves_x) == len(moves_o) == 4
+        board = _build_board(
             [(0, 0), (1, 1), (2, 2), (3, 3)],
-            [(0, 1), (1, 0), (2, 1)],
+            [(0, 2), (0, 4), (2, 0), (4, 0)],
         )
         agent = RuleBasedAgent()
 
@@ -249,9 +316,9 @@ class TestWinNow:
 
     def test_thang_cheo_phu_o(self):
         """O có 4 quân chéo phụ (1,9)–(4,6), thắng tại (5,5) hoặc (0,10)."""
-        # Arrange: X không có chuỗi thắng
-        board = _board_from_stones(
-            [(0, 0), (1, 1), (2, 2)],
+        # Arrange: đến lượt O -> len(moves_x) == len(moves_o) + 1 (5 và 4)
+        board = _build_board(
+            [(0, 0), (0, 2), (0, 4), (2, 0), (2, 2)],
             [(1, 9), (2, 8), (3, 7), (4, 6)],
         )
         agent = RuleBasedAgent()
@@ -266,10 +333,10 @@ class TestWinNow:
 
     def test_thang_sat_bien_trai_x(self):
         """X có 4 quân sát cột 0, nước thắng tại (0,4) — nằm trong biên."""
-        # Arrange
-        board = _board_from_stones(
+        # Arrange: đến lượt X -> len(moves_x) == len(moves_o) == 4
+        board = _build_board(
             [(0, 0), (0, 1), (0, 2), (0, 3)],
-            [(1, 5), (2, 5), (3, 5)],
+            [(2, 5), (2, 7), (4, 5), (4, 7)],
         )
         agent = RuleBasedAgent()
 
@@ -282,11 +349,11 @@ class TestWinNow:
         assert action == (0, 4), f"Nước thắng phải là (0,4), nhận được {action}"
 
     def test_thang_chuoi_hon_5_quan(self):
-        """X có 5 quân liên tiếp + 1 khoảng trống ở giữa tạo chuỗi 6 → vẫn thắng."""
-        # Arrange: X tại (0,1)(0,2)(0,3)(0,5)(0,6), ô (0,4) trống → nối 6
-        board = _board_from_stones(
+        """X có 5 quân + 1 khoảng trống ở giữa tạo chuỗi 6 → vẫn thắng."""
+        # Arrange: đến lượt X -> len(moves_x) == len(moves_o) == 5
+        board = _build_board(
             [(0, 1), (0, 2), (0, 3), (0, 5), (0, 6)],
-            [(2, 0), (3, 0), (4, 0)],
+            [(2, 0), (2, 2), (4, 0), (4, 2), (6, 0)],
         )
         agent = RuleBasedAgent()
 
@@ -300,10 +367,10 @@ class TestWinNow:
 
     def test_thang_chuoi_bi_chan_2_dau(self):
         """O X X . X X O — đặt vào giữa tạo 5 quân liên tiếp (bị chặn 2 đầu) → vẫn thắng."""
-        # Arrange: X tại (0,2)(0,3)(0,5)(0,6); O chặn (0,1) và (0,7)
-        board = _board_from_stones(
+        # Arrange: đến lượt X -> len(moves_x) == len(moves_o) == 4
+        board = _build_board(
             [(0, 2), (0, 3), (0, 5), (0, 6)],
-            [(0, 1), (0, 7), (2, 0)],
+            [(0, 1), (0, 7), (2, 0), (2, 2)],
         )
         agent = RuleBasedAgent()
 
@@ -329,9 +396,9 @@ class TestBlockUrgent:
 
     def test_x_chan_o_ngang(self):
         """O có 4 quân ngang tại hàng 7; X phân tán, không thắng ngay → X chặn."""
-        # Arrange: X có 3 quân phân tán (không tạo chuỗi 4+)
-        board = _board_from_stones(
-            [(0, 0), (2, 2), (4, 4)],           # X: phân tán, không đe dọa
+        # Arrange: đến lượt X -> len(moves_x) == len(moves_o) == 4
+        board = _build_board(
+            [(0, 0), (0, 2), (2, 0), (2, 2)],   # X: 4 quân phân tán
             [(7, 3), (7, 4), (7, 5), (7, 6)],   # O: 4 quân ngang → đe dọa (7,2) và (7,7)
         )
         agent = RuleBasedAgent()
@@ -349,10 +416,10 @@ class TestBlockUrgent:
 
     def test_o_chan_x_ngang(self):
         """X có 4 quân ngang tại hàng 2; O phân tán, không thắng ngay → O chặn."""
-        # Arrange
-        board = _board_from_stones(
+        # Arrange: đến lượt O -> len(moves_x) == len(moves_o) + 1 (4 và 3)
+        board = _build_board(
             [(2, 1), (2, 2), (2, 3), (2, 4)],   # X: 4 quân ngang
-            [(0, 0), (1, 1), (3, 3)],            # O: phân tán, không đe dọa
+            [(0, 0), (0, 2), (4, 0)],            # O: 3 quân phân tán
         )
         agent = RuleBasedAgent()
 
@@ -367,9 +434,9 @@ class TestBlockUrgent:
 
     def test_x_chan_o_doc(self):
         """O có 4 quân dọc cột 7 hàng 0–3; X không thắng → X phải chặn."""
-        # Arrange
-        board = _board_from_stones(
-            [(5, 0), (6, 1), (7, 2)],           # X: phân tán
+        # Arrange: đến lượt X -> len(moves_x) == len(moves_o) == 4
+        board = _build_board(
+            [(5, 0), (5, 2), (7, 0), (7, 2)],   # X: 4 quân phân tán
             [(0, 7), (1, 7), (2, 7), (3, 7)],   # O: 4 quân dọc
         )
         agent = RuleBasedAgent()
@@ -384,10 +451,10 @@ class TestBlockUrgent:
 
     def test_o_chan_x_doc(self):
         """X có 4 quân dọc cột 3 hàng 2–5; O không thắng → O phải chặn."""
-        # Arrange
-        board = _board_from_stones(
+        # Arrange: đến lượt O -> len(moves_x) == len(moves_o) + 1 (4 và 3)
+        board = _build_board(
             [(2, 3), (3, 3), (4, 3), (5, 3)],   # X: 4 quân dọc
-            [(0, 0), (1, 1), (8, 8)],            # O: phân tán
+            [(0, 0), (0, 2), (8, 8)],            # O: 3 quân phân tán
         )
         agent = RuleBasedAgent()
 
@@ -401,9 +468,9 @@ class TestBlockUrgent:
 
     def test_x_chan_o_cheo_chinh(self):
         """O có 4 quân chéo chính (1,1)–(4,4); X không thắng → X phải chặn."""
-        # Arrange
-        board = _board_from_stones(
-            [(0, 2), (2, 0), (8, 8)],           # X: phân tán
+        # Arrange: đến lượt X -> len(moves_x) == len(moves_o) == 4
+        board = _build_board(
+            [(0, 2), (0, 4), (2, 0), (8, 8)],   # X: 4 quân phân tán
             [(1, 1), (2, 2), (3, 3), (4, 4)],   # O: 4 quân chéo chính
         )
         agent = RuleBasedAgent()
@@ -418,10 +485,10 @@ class TestBlockUrgent:
 
     def test_x_chan_o_cheo_phu(self):
         """O có 4 quân chéo phụ (1,9)–(4,6); X không thắng → X phải chặn."""
-        # Arrange
-        board = _board_from_stones(
-            [(0, 0), (1, 1), (8, 8)],
-            [(1, 9), (2, 8), (3, 7), (4, 6)],
+        # Arrange: đến lượt X -> len(moves_x) == len(moves_o) == 4
+        board = _build_board(
+            [(0, 0), (0, 2), (2, 0), (8, 8)],   # X: 4 quân phân tán
+            [(1, 9), (2, 8), (3, 7), (4, 6)],   # O: 4 quân chéo phụ
         )
         agent = RuleBasedAgent()
 
@@ -435,10 +502,10 @@ class TestBlockUrgent:
 
     def test_chan_sat_bien_duoi(self):
         """O có 4 quân sát hàng 10 (biên dưới); X không thắng → X chặn."""
-        # Arrange
-        board = _board_from_stones(
-            [(5, 0), (6, 1), (7, 2)],           # X: phân tán
-            [(10, 0), (10, 1), (10, 2), (10, 3)],  # O: sát biên dưới
+        # Arrange: đến lượt X -> len(moves_x) == len(moves_o) == 4
+        board = _build_board(
+            [(5, 0), (5, 2), (7, 0), (7, 2)],       # X: 4 quân phân tán
+            [(10, 0), (10, 1), (10, 2), (10, 3)],   # O: sát biên dưới
         )
         agent = RuleBasedAgent()
 
@@ -452,9 +519,9 @@ class TestBlockUrgent:
 
     def test_chan_sat_bien_trai(self):
         """O có 4 quân sát cột 0 (biên trái); X không thắng → X chặn."""
-        # Arrange
-        board = _board_from_stones(
-            [(5, 5), (6, 6), (7, 7)],           # X: phân tán
+        # Arrange: đến lượt X -> len(moves_x) == len(moves_o) == 4
+        board = _build_board(
+            [(5, 5), (5, 7), (7, 5), (7, 7)],   # X: 4 quân phân tán
             [(0, 0), (1, 0), (2, 0), (3, 0)],   # O: sát biên trái
         )
         agent = RuleBasedAgent()
@@ -478,10 +545,9 @@ class TestWinOverBlock:
     """
 
     def test_x_co_the_thang_va_o_dang_de_doa(self):
-        """X có cơ hội thắng ngay NÀ O cũng có 4 quân đe dọa → X chọn thắng."""
-        # Arrange: X có 4 quân ngang hàng 5 (thắng tại (5,0) hoặc (5,5))
-        #          O có 4 quân dọc cột 9 (đe dọa tại (4,9))
-        board = _board_from_stones(
+        """X có cơ hội thắng ngay VÀ O cũng có 4 quân đe dọa → X chọn thắng."""
+        # Arrange: đến lượt X -> len(moves_x) == len(moves_o) == 4
+        board = _build_board(
             [(5, 1), (5, 2), (5, 3), (5, 4)],   # X: 4 ngang → thắng ngay
             [(0, 9), (1, 9), (2, 9), (3, 9)],   # O: 4 dọc → đe dọa
         )
@@ -500,11 +566,10 @@ class TestWinOverBlock:
 
     def test_o_co_the_thang_va_x_dang_de_doa(self):
         """O có cơ hội thắng ngay VÀ X cũng có 4 quân đe dọa → O chọn thắng."""
-        # Arrange: O có 4 quân dọc cột 3 (thắng tại (4,3) hoặc (-1,3)→ không có)
-        #          X có 4 quân ngang hàng 8 (đe dọa O)
-        board = _board_from_stones(
-            [(8, 2), (8, 3), (8, 4), (8, 5)],   # X: 4 ngang → đe dọa O
-            [(0, 3), (1, 3), (2, 3), (3, 3)],   # O: 4 dọc → thắng ngay
+        # Arrange: đến lượt O -> len(moves_x) == len(moves_o) + 1 (5 và 4)
+        board = _build_board(
+            [(8, 2), (8, 3), (8, 4), (8, 5), (10, 10)],  # X: 4 ngang + 1 quân rời
+            [(0, 3), (1, 3), (2, 3), (3, 3)],            # O: 4 dọc → thắng ngay
         )
         agent = RuleBasedAgent()
 
@@ -523,16 +588,15 @@ class TestWinOverBlock:
     def test_uu_tien_thang_hon_chan_tham_so_hoa(self, player):
         """Với cả X và O: win_now luôn được ưu tiên hơn block_urgent."""
         # Arrange: player có 4 quân thẳng hàng; đối thủ cũng có 4 quân đe dọa
-        opponent = -player
         if player == PLAYER_X:
-            board = _board_from_stones(
+            board = _build_board(
                 [(2, 0), (2, 1), (2, 2), (2, 3)],   # X: 4 quân → thắng tại (2,4)
                 [(4, 0), (4, 1), (4, 2), (4, 3)],   # O: 4 quân → đe dọa tại (4,4)
             )
         else:
-            board = _board_from_stones(
-                [(4, 0), (4, 1), (4, 2), (4, 3)],   # X: 4 quân → đe dọa O
-                [(2, 0), (2, 1), (2, 2), (2, 3)],   # O: 4 quân → thắng tại (2,4)
+            board = _build_board(
+                [(4, 0), (4, 1), (4, 2), (4, 3), (10, 10)],  # X: 4 quân đe dọa + 1 quân rời
+                [(2, 0), (2, 1), (2, 2), (2, 3)],            # O: 4 quân → thắng tại (2,4)
             )
         agent = RuleBasedAgent()
 
@@ -656,6 +720,15 @@ class TestEdgeCasesAndContract:
         assert isinstance(info["candidate_count"], int) and info["candidate_count"] > 0
         assert isinstance(info["matching_actions"], list)
         assert isinstance(info["reason"], str) and len(info["reason"]) > 0
+
+        # Kiểm tra matching_actions ở positional_fallback chỉ lưu top_group điểm cao nhất
+        board_one_stone = _build_board([(5, 5)], [])
+        agent.choose_action(board_one_stone, PLAYER_O)
+        info_fb = agent.explain_last_action()
+        assert info_fb["candidate_count"] == 24
+        assert len(info_fb["matching_actions"]) == 8, (
+            "matching_actions ở positional_fallback chỉ nên giữ nhóm điểm vị trí cao nhất"
+        )
 
     def test_explain_la_ban_sao_doc_lap(self):
         """explain_last_action() trả về bản sao, không ảnh hưởng last_decision_info."""

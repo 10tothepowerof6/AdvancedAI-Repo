@@ -312,11 +312,21 @@ class RuleBasedAgent(BaseAgent):
         self.stats["nodes_visited"] += len(candidates)
 
         best = self._choose_best(candidates, board, player)
+        scored_candidates = [
+            (positional_score(board, r, c, player), (r, c))
+            for r, c in candidates
+        ]
+        best_pos_score = max(score for score, _ in scored_candidates)
+        top_group = [
+            action
+            for score, action in scored_candidates
+            if score == best_pos_score
+        ]
         self.last_decision_info = {
             "rule_triggered": "positional_fallback",
             "selected_action": best,
             "candidate_count": len(candidates),
-            "matching_actions": list(candidates),
+            "matching_actions": top_group,
             "reason": (
                 f"Dự phòng vị trí tại {best} — không có đe dọa trực tiếp, "
                 f"chọn từ {len(candidates)} ứng viên bán kính "
