@@ -13,6 +13,7 @@ from agents.minimax_agent import (
     MinimaxAgent,
     MinimaxSearcher,
     SearchState,
+    SearchTimeout,
     default_weights,
     evaluate,
     find_winner,
@@ -994,3 +995,84 @@ def test_agent_time_mode_requires_deadline():
 def test_agent_rejects_invalid_time_margin(margin):
     with pytest.raises(ValueError):
         MinimaxAgent(time_margin_s=margin)
+
+
+# Sửa theo review PR #20
+
+def _counting_evaluate(searcher):
+    """Bọc _evaluate của một searcher để đếm số lần chấm điểm."""
+    calls = []
+    original = searcher._evaluate
+    searcher._evaluate = lambda state, perspective: (calls.append(1), original(state, perspective))[1]
+    return calls
+
+
+def test_move_ordering_checks_deadline_before_each_child():
+    # Arrange: hạn dừng báo hết giờ ở lần kiểm tra thứ 3
+    state = _random_state(seed=2, n_moves=10)
+    checks = []
+    searcher = MinimaxSearcher(move_ordering=True,
+                               should_stop=lambda: checks.append(1) or len(checks) >= 3)
+    evaluations = _counting_evaluate(searcher)
+    # Act + Assert: dừng ngay, chỉ chấm 2 nước thay vì cả nhóm ứng viên
+    with pytest.raises(SearchTimeout):
+        searcher.ordered_moves(state, depth_left=2)
+    assert len(checks) == 3
+    assert len(evaluations) == 2 < len(state.candidates())
+
+
+def test_search_with_ordering_stops_at_root_when_time_is_up():
+    # Arrange
+    state = _random_state(seed=2, n_moves=10)
+    searcher = MinimaxSearcher(move_ordering=True, should_stop=lambda: True)
+    evaluations = _counting_evaluate(searcher)
+    # Act + Assert: hết giờ từ đầu nên không chấm nước gốc nào
+    with pytest.raises(SearchTimeout):
+        searcher.search(state, 2)
+    assert evaluations == [] and searcher.nodes_visited == 1
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_deadline_check_does_not_change_ordered_search(seed):
+    # Arrange
+    state = _random_state(seed, 10 + seed)
+    # Act
+    without_deadline = MinimaxSearcher(move_ordering=True).search(state, 2)
+    with_deadline = MinimaxSearcher(move_ordering=True, should_stop=lambda: False).search(state, 2)
+    # Assert: chưa tới hạn thì kết quả, số nút, số lần cắt giữ nguyên
+    assert with_deadline == without_deadline
+
+
+def test_agent_time_mode_stops_during_root_ordering_with_fake_clock(monkeypatch):
+    # Arrange: đồng hồ giả tăng 1 ms mỗi lần đọc; mốc dừng rơi vào lúc đang chấm
+    # các nước gốc của độ sâu 2 (độ sâu 1 cần khoảng n lần kiểm tra cho n nước gốc).
+    import agents.minimax_agent as minimax_module
+    game = _random_board(seed=2, n_moves=10)
+    n_root = len(candidate_actions(game.board))
+    ticks = iter(range(10 ** 6))
+    monkeypatch.setattr(minimax_module, "perf_counter", lambda: next(ticks) / 1000)
+    agent = MinimaxAgent(budget=SearchBudget(mode="time"), time_margin_s=0.0)
+    evaluations = _counting_evaluate(agent.searcher)
+    agent.deadline = (n_root + 2 + 30) / 1000
+    # Act
+    action = agent.get_action(game.board.copy(), game.current_player)
+    # Assert: giữ kết quả độ sâu 1; ở độ sâu 2 dừng giữa chừng khi chấm nước gốc
+    assert agent.stats["depth_reached"] == 1
+    assert action in game.legal_actions()
+    assert n_root <= len(evaluations) < 2 * n_root
+
+
+@pytest.mark.parametrize("mode", ["fixed", "time"])
+@pytest.mark.parametrize("name", ["X-ngang-5", "O-chéo phụ-6"])
+def test_agent_rejects_finished_game(name, mode):
+    # Arrange: ván đã có người thắng nhưng bàn vẫn còn ô trống
+    moves, winner = FIXTURES[name]
+    game = _game_after(moves)
+    board = game.board.copy()
+    agent = MinimaxAgent(budget=SearchBudget(mode=mode))
+    assert game.result() == winner and np.any(board == 0)
+    # Act + Assert: gọi qua choose_action như runner, với cả hai bên
+    for player in (X, O):
+        with pytest.raises(ValueError, match="kết thúc"):
+            agent.choose_action(board, player)
+    np.testing.assert_array_equal(board, game.board)
