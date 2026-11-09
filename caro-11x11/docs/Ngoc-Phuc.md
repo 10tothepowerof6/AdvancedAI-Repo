@@ -381,13 +381,13 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 - [ ] Không đưa vào Git các file không liên quan, thư mục môi trường ảo (`.venv`) hoặc dữ liệu có dung lượng lớn.
 - [ ] Nhóm trưởng xác nhận kiểm thử tích hợp thành công trước khi chính thức nghiệm thu phần việc.
 
-*Trạng thái tài liệu: Giai đoạn 1 đã cài đặt và kiểm thử, chờ review/merge. Giai đoạn 2 và 3 chưa thực hiện.*
+*Trạng thái tài liệu: Giai đoạn 1 đã merge (PR #17). Giai đoạn 2 đã mở PR #20 và sửa theo review, chờ duyệt lại. Giai đoạn 3 chưa thực hiện.*
 
 ---
 
 ## 12. Nhật ký thực hiện — Giai đoạn 1
 
-### Trạng thái: Đã cài đặt và kiểm thử, chờ review
+### Trạng thái: Đã merge (PR #17)
 
 ### Thành phần đã cài đặt (`agents/minimax_agent.py`)
 | Thành phần | Vai trò |
@@ -433,3 +433,59 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 - Toàn bộ test của dự án: 242 pass (trước khi sửa: 209).
 - Đã cố ý cài lại từng lỗi (bỏ kiểm tra cận, dùng `>` thay `>=`, bỏ chỉ đọc ở `__init__`, bỏ chỉ đọc ở `apply`, `evaluate` dùng lại `WINDOW_WEIGHTS`): cả 5 đều bị test bắt.
 - Notebook chạy lại cho kết quả giống hệt bản đã commit, vì trọng số mặc định cho luật 5 quân không đổi.
+
+---
+
+## 13. Nhật ký thực hiện - Giai đoạn 2
+
+### Trạng thái: Đã mở PR #20, đã sửa theo review, chờ duyệt lại
+
+### Thành phần đã cài đặt (`agents/minimax_agent.py`)
+| Thành phần | Vai trò |
+| :--- | :--- |
+| `MinimaxSearcher` | Minimax giới hạn độ sâu với cờ `use_alpha_beta` (bật/tắt cắt tỉa) và `move_ordering` (bật/tắt sắp xếp nước). |
+| `SearchResult` | Kết quả một lần tìm kiếm: giá trị gốc, nước đi, độ sâu, số nút duyệt, số lần cắt tỉa. |
+| `MinimaxAgent` | Tác tử theo hợp đồng `BaseAgent`: chế độ `fixed` và `time` (Iterative Deepening). |
+
+### Quyết định thiết kế chính
+- **Độ sâu và vai trò:** một ply là một nước của một bên. Nút gốc là Max (bên đến lượt ở gốc); nút mà đối thủ đến lượt là Min. Mọi điểm tính theo góc nhìn bên ở gốc.
+- **Terminal:** không mở rộng. Thắng ở ply `p` được `WIN_SCORE - p`, thua được `-(WIN_SCORE - p)`: ưu tiên thắng sớm và kéo dài khi buộc phải thua.
+- **Alpha-Beta bật/tắt trên cùng nền tảng:** hai chế độ dùng chung trạng thái, hàm lượng giá, tập ứng viên (bán kính 2) và thứ tự xét nước. Khi tắt, alpha/beta không được cập nhật nên không có lần cắt nào.
+- **Thứ tự xét nước:** mặc định hàng rồi cột của `candidate_actions`. Tùy chọn `move_ordering=True` (mặc định của tác tử) sắp nước con theo heuristic của bên đi, tốt trước, chỉ ở nút còn ít nhất 2 ply; sort ổn định nên tất định.
+- **Phá hòa:** giữ nước đồng điểm gặp đầu tiên (so sánh `>` chặt). Nhờ vậy bật/tắt Alpha-Beta trả về cùng một nước khi cùng thứ tự xét.
+- **Thống kê:** `nodes_visited` đếm mọi nút được duyệt, tính cả gốc. `pruned_nodes` đếm số lần `alpha >= beta` mà còn ít nhất một nước con chưa xét; đây là số lần cắt, không phải số nút bị bỏ qua. Tác tử ghi thêm `depth_reached` và `root_value` vào `stats`.
+- **Chế độ `time`:** Iterative Deepening từ độ sâu 1. Dừng chủ động ở `deadline - 0,1 s` (kiểm tra ở mọi nút); độ sâu đang dở bị bỏ, giữ kết quả độ sâu hoàn tất gần nhất. Nước tốt nhất của độ sâu trước được xét đầu tiên ở gốc. Dừng sớm khi đã chứng minh thắng/thua chắc chắn. Nước dự phòng là ứng viên đầu tiên nếu chưa xong độ sâu 1. Độ sâu của chế độ `fixed` không được dùng làm điều kiện dừng.
+- **Trọng số theo luật của trạng thái:** `weights=None` dùng `default_weights` theo `win_length` và cỡ bàn của trạng thái đang tìm, giống `evaluate()` sau review PR #17. Vì điểm thắng bị trừ theo ply, cận heuristic phải nhỏ hơn `WIN_SCORE - số ô của bàn` (11×11: cận 252 000, còn dư khoảng 9,75 triệu). `MinimaxSearcher` kiểm tra khi bắt đầu tìm kiếm; `MinimaxAgent` kiểm tra ngay khi tạo vì tác tử luôn chơi luật của engine.
+- **Tối ưu không đổi kết quả:** trong vòng tìm kiếm dùng lõi heuristic không kiểm tra đầu vào; khi không sắp xếp, trạng thái con chỉ được sinh khi thực sự xét nên nhánh bị cắt không tốn công. Đo trên máy nhóm: nhanh hơn 2-4 lần, giá trị và nước đi không đổi.
+
+### Kiểm thử bổ sung (`tests/test_minimax_agent.py`)
+- Bản Minimax tham chiếu và Alpha-Beta tham chiếu viết độc lập trong file test (duyệt hết, thứ tự hàng/cột) để đối chiếu.
+- Chiến thuật: thắng ngay cho X và O ở độ sâu 1/2/3, chặn chuỗi 4 cho X và O ở độ sâu 2, ưu tiên thắng thay vì chặn khi cả hai cùng có 4.
+- Giá trị gốc khớp tham chiếu ở độ sâu 1, 2 (và 3 trên cây nhỏ), cho cả 4 tổ hợp bật/tắt cắt tỉa và sắp xếp; nước trả về đạt đúng giá trị gốc.
+- Bật/tắt Alpha-Beta: cùng giá trị, cùng nước, số nút không tăng (6 vị trí × độ sâu 1, 2 × 2 thứ tự xét = 24 ca); số nút và số lần cắt khớp chính xác bản tham chiếu, kể cả trường hợp `alpha >= beta` ở nước con cuối (không tính là cắt).
+- Số nút khi tắt cắt tỉa đúng bằng cây duyệt hết, chứng minh dừng đúng độ sâu và không mở rộng nút terminal.
+- Trọng số: trọng số sai bị từ chối ở cả searcher và tác tử; bàn 4×4 luật 4 quân với cận `WIN_SCORE - 15` được `evaluate()` nhận nhưng search từ chối vì không chừa đủ biên ply; trọng số mặc định cho đúng nước thắng trên các luật 3×3, 6×6 luật 4, 11×11 luật 5; mặc định cho cùng kết quả với truyền `WINDOW_WEIGHTS`.
+- Tác tử: nước hợp lệ, bàn cờ gốc giữ nguyên, thống kê đặt lại mỗi lượt, chơi trọn ván với Random (độ sâu 1 và 2), chế độ `time` trả đúng giá trị của độ sâu đã hoàn tất, dùng nước dự phòng khi hết giờ, dừng sớm khi đã thắng chắc.
+- Thử cố ý cài 11 lỗi (đảo vai Max/Min, bỏ trừ ply, lệch độ sâu, sai phá hòa, sai điều kiện cắt, không cập nhật beta, đếm cắt sai, Iterative Deepening dùng độ sâu dở, không dừng khi thắng chắc, không cộng dồn thống kê...): bộ test phát hiện 10 lỗi. Lỗi còn lại ("cắt khi tắt Alpha-Beta") không làm đổi hành vi vì khi tắt, alpha/beta luôn là vô cực. Thêm 2 lỗi cho phần trọng số (bỏ biên ply, searcher dùng lại `WINDOW_WEIGHTS`): cả 2 đều bị bắt.
+- Toàn bộ test của dự án (kể cả MCTS và mạng nơ-ron của nhóm trên `main`): 491 pass.
+
+### Notebook (`notebooks/02_minimax.ipynb`)
+- Phần 5: cây nhỏ độ sâu 2 (bán kính 1) in toàn bộ giá trị Max/Min, giá trị tính tay trùng `MinimaxSearcher` (-85 tại (4,5)); Alpha-Beta trên cùng cây cho cùng giá trị và cùng nước, duyệt 64/187 nút với 10 lần cắt; bản đồ giá trị từng nước gốc; so sánh tầm nhìn độ sâu 1 và 2 trên thế "X phải chặn" có in bàn cờ và bên đến lượt (71/71 nước không chặn dẫn tới thua ở ply 2).
+- Phần 6: 6 vị trí × độ sâu 1, 2 × có/không sắp xếp: giá trị gốc và nước đi trùng khớp 100%. Ở độ sâu 2, Alpha-Beta giảm trung bình 71,2% số nút khi không sắp xếp và 84,6% khi có sắp xếp. Ở độ sâu 1 không có cắt tỉa (nút gốc không có cận trên).
+- Phần 6.1: 4 ván qua `play_match` ở chế độ `time` 2,0 s (Minimax cầm X và O, Random seed 0 và 1): 23 nước, không timeout, `elapsed_s` lớn nhất 1,902 s, p95 1,901 s; độ sâu hoàn tất 3-5 ở 19/23 nước, 4 nước còn lại dừng ở độ sâu 1. Các số này phụ thuộc tốc độ máy nên mỗi lần chạy lệch đôi chút.
+
+### Hạn chế kỹ thuật đã biết
+- Độ sâu 3 không cắt tỉa mất hàng chục giây mỗi nước nên không dùng thực tế; tác tử chế độ `fixed` mặc định độ sâu 2.
+- Biên 0,1 s mới kiểm chứng trên một máy (số liệu phần 6.1); máy chậm hơn có thể cần biên lớn hơn.
+- Sắp xếp nước dùng heuristic tĩnh; chưa có bảng chuyển vị (transposition table) hay killer move.
+- Tập ứng viên bán kính 2 có thể bỏ sót nước xa cụm quân.
+
+### Sửa theo review PR #20
+| Góp ý | Cách sửa | Test bổ sung |
+| :--- | :--- | :--- |
+| Khi bật sắp xếp nước, `ordered_moves` tạo và chấm điểm cả nhóm ứng viên rồi mới kiểm tra hạn dừng (đo được: hết giờ ngay từ đầu vẫn chấm 99/99 nước gốc). | Kiểm tra `should_stop()` trước khi sinh và chấm từng nước con; hết giờ báo `SearchTimeout` ngay. Phần kiểm tra được gom vào `_check_stop()` dùng chung với `_minimax`. Thứ tự sắp xếp và kết quả tìm kiếm không đổi. | Hạn dừng báo hết giờ ở lần kiểm tra thứ 3 thì chỉ chấm 2 nước; hết giờ từ đầu thì không chấm nước gốc nào; chưa tới hạn thì kết quả, số nút, số lần cắt giữ nguyên; đồng hồ giả cho tác tử chế độ `time` dừng giữa lúc chấm nước gốc ở độ sâu 2 và giữ kết quả độ sâu 1. |
+| Ván đã có người thắng nhưng bàn còn ô trống thì tác tử vẫn trả về một ô trống. | `get_action` báo `ValueError` ngay khi trạng thái đã kết thúc; bỏ nhánh tự chọn ô trống. Ván chưa kết thúc luôn có ô trống kề một quân nên tập ứng viên không rỗng. | Gọi qua `choose_action()` trên ván X thắng và ván O thắng, cho cả hai bên, ở cả chế độ `fixed` và `time`: đều báo `ValueError`, bàn cờ đầu vào giữ nguyên. |
+
+- Toàn bộ test của dự án: 501 pass (trước khi sửa: 491).
+- Đã cố ý cài lại từng lỗi (bỏ kiểm tra hạn khi chấm nước, chỉ kiểm tra sau khi đã chấm hết, ván kết thúc vẫn trả ô trống): cả 3 đều bị test bắt.
+- Notebook chạy lại với code mới cho giá trị, nước đi, số nút và số lần cắt giống hệt bản đã commit; chỉ các số đo thời gian lệch vài mili giây như mọi lần chạy, nên không commit lại notebook.
