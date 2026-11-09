@@ -401,6 +401,11 @@ class MinimaxSearcher:
             return terminal_score(state.result(), perspective)
         return perspective * _raw_heuristic(state.board, self.weights_for(state), state.win_length)
 
+    def _check_stop(self) -> None:
+        """Dừng hợp tác: báo SearchTimeout khi should_stop() cho biết đã tới mốc dừng."""
+        if self.should_stop is not None and self.should_stop():
+            raise SearchTimeout
+
     def ordered_moves(self, state: SearchState, depth_left: int,
                       first_action: Action | None = None
                       ) -> list[tuple[Action, SearchState | None]]:
@@ -409,12 +414,19 @@ class MinimaxSearcher:
         Không sắp xếp: thứ tự hàng/cột của candidate_actions, trạng thái con được
         tạo khi cần (None) để nhánh bị cắt tỉa không tốn công sinh. Có sắp xếp:
         phải sinh mọi con để lượng giá, nên trả kèm trạng thái con để dùng lại.
+        Khi sắp xếp, hạn dừng được kiểm tra trước khi sinh và chấm từng nước con;
+        hết giờ thì báo SearchTimeout ngay thay vì chấm hết cả nhóm ứng viên.
         """
         actions = state.candidates(self.radius)
         if self.move_ordering and depth_left >= 2:
             mover = state.current_player
-            moves = [(action, state.apply(action)) for action in actions]
-            moves.sort(key=lambda item: -self._evaluate(item[1], mover))
+            scored = []
+            for action in actions:
+                self._check_stop()
+                child = state.apply(action)
+                scored.append((action, child, -self._evaluate(child, mover)))
+            scored.sort(key=lambda item: item[2])  # sort ổn định: đồng điểm giữ thứ tự hàng/cột
+            moves = [(action, child) for action, child, _ in scored]
         else:
             moves = [(action, None) for action in actions]
         if first_action is not None:
@@ -451,8 +463,7 @@ class MinimaxSearcher:
     def _minimax(self, state: SearchState, depth: int, ply: int,
                  alpha: int, beta: int, root: int) -> int:
         self.nodes_visited += 1
-        if self.should_stop is not None and self.should_stop():
-            raise SearchTimeout
+        self._check_stop()
         if state.is_terminal():
             score = terminal_score(state.result(), root)
             return score - ply if score > 0 else score + ply if score < 0 else 0
@@ -511,14 +522,13 @@ class MinimaxAgent(BaseAgent):
 
     def get_action(self, board: np.ndarray, player: int) -> Action:
         state = SearchState(board, player)
+        if state.is_terminal():
+            # Hợp đồng chỉ cho chọn nước khi ván chưa kết thúc; engine không còn nước hợp lệ.
+            raise ValueError("Ván đấu đã kết thúc, không còn nước đi hợp lệ để chọn")
         self.last_result = None
         self.stats.update(depth_reached=0, root_value=None)
-        candidates = state.candidates(self.searcher.radius)
-        if not candidates:
-            # Chỉ xảy ra khi bên gọi vi phạm hợp đồng (ván đã kết thúc); vẫn trả nước hợp lệ.
-            row, col = np.argwhere(state.board == EMPTY)[0]
-            return int(row), int(col)
-        fallback = candidates[0]
+        # Ván chưa kết thúc thì luôn có ô trống kề một quân, nên tập ứng viên không rỗng.
+        fallback = state.candidates(self.searcher.radius)[0]
 
         if self.budget.mode == "fixed":
             self.searcher.should_stop = None
