@@ -12,6 +12,8 @@ Mọi phương thức công khai đều tuân thủ hợp đồng BaseAgent:
 
 from __future__ import annotations
 
+from time import perf_counter
+
 import numpy as np
 
 from agents.base_agent import BaseAgent
@@ -22,6 +24,9 @@ from core.game_utils import candidate_actions
 
 # 4 hướng kiểm tra: ngang, dọc, chéo chính, chéo phụ
 DIRECTIONS: tuple[tuple[int, int], ...] = ((0, 1), (1, 0), (1, 1), (1, -1))
+
+# Mốc dừng hợp tác (giây) — thấp hơn hạn cứng 2.0 giây ở chế độ time
+COOPERATIVE_TIME_LIMIT_S: float = 1.9
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +71,31 @@ def is_winning_move(
             return True
 
     return False
+
+
+def _count_winning_lines(
+    board: np.ndarray,
+    row: int,
+    col: int,
+    player: int,
+    win_length: int = WIN_LENGTH,
+) -> int:
+    """Đếm số hướng (trong 4 hướng) mà nước đi (row, col) giúp player tạo chuỗi >= win_length."""
+    if board[row, col] != EMPTY:
+        return 0
+    board_size = board.shape[0]
+    cnt = 0
+    for dr, dc in DIRECTIONS:
+        count = 1
+        for sign in (-1, 1):
+            r, c = row + sign * dr, col + sign * dc
+            while 0 <= r < board_size and 0 <= c < board_size and board[r, c] == player:
+                count += 1
+                r += sign * dr
+                c += sign * dc
+        if count >= win_length:
+            cnt += 1
+    return cnt
 
 
 def find_winning_actions(
@@ -354,7 +384,86 @@ class RuleBasedAgent(BaseAgent):
           matching_actions: danh sách các nước cùng tầng (đã tìm được)
           reason          : mô tả tiếng Việt về lý do chọn nước đó
         """
-        return dict(self.last_decision_info)
+        info = dict(self.last_decision_info)
+        # Sao chép cả danh sách và ép kiểu int thuần để bảo vệ trạng thái nội bộ
+        if "matching_actions" in info and isinstance(info["matching_actions"], (list, tuple)):
+            info["matching_actions"] = [
+                (int(r), int(c)) for r, c in info["matching_actions"]
+            ]
+        if "selected_action" in info and isinstance(info["selected_action"], tuple):
+            info["selected_action"] = (
+                int(info["selected_action"][0]),
+                int(info["selected_action"][1]),
+            )
+        return info
+
+    # ------------------------------------------------------------------
+    # Hỗ trợ tầng pattern: mốc dừng thời gian và chọn nước chặn tối ưu
+    # ------------------------------------------------------------------
+
+    def _should_stop_scanning(self) -> bool:
+        """Cho biết có nên dừng quét pattern (mốc hợp tác 1.9 giây ở chế độ time)."""
+        if self.time_exhausted():
+            return True
+        if self.deadline is None:
+            return False
+        # Dừng sớm hơn hạn cứng: tối đa 1.9 giây tính từ lúc bắt đầu suy nghĩ
+        margin = max(0.0, self.budget.time_limit_s - COOPERATIVE_TIME_LIMIT_S)
+        return perf_counter() >= self.deadline - margin
+
+    def _least_counterplay_actions(
+        self,
+        actions: list[Action],
+        board: np.ndarray,
+        player: int,
+        candidates: list[Action],
+        rule_label: str = "block_open_four",
+    ) -> list[Action]:
+        """Lọc các nước chặn để lại ít cơ hội nguy hiểm nhất cho đối thủ.
+
+        Với mỗi nước, đặt quân `player` lên bản sao bàn cờ rồi đếm:
+          - block_open_three: số ô đối thủ vẫn tạo được open_four hoặc open_three.
+          - block_open_four: số ô đối thủ vẫn tạo được open_four.
+        Kiểm tra mốc thời gian hợp tác _should_stop_scanning() để không vượt hạn.
+        """
+        opponent = -player
+        counts: list[tuple[int, Action]] = []
+        for row, col in actions:
+            if self._should_stop_scanning():
+                break
+            board_after = board.copy()
+            board_after[row, col] = player
+            remaining = 0
+            timed_out = False
+            if rule_label == "block_open_three":
+                for nr, nc in actions:
+                    if (nr, nc) == (row, col):
+                        continue
+                    if self._should_stop_scanning():
+                        timed_out = True
+                        break
+                    if creates_open_four(
+                        board_after, nr, nc, opponent
+                    ) or creates_open_three(board_after, nr, nc, opponent):
+                        remaining += 1
+            else:
+                for nr, nc in candidates:
+                    if (nr, nc) == (row, col):
+                        continue
+                    if self._should_stop_scanning():
+                        timed_out = True
+                        break
+                    if creates_open_four(board_after, nr, nc, opponent):
+                        remaining += 1
+            if timed_out:
+                break
+            counts.append((remaining, (int(row), int(col))))
+
+        if not counts:
+            return actions
+
+        fewest = min(count for count, _ in counts)
+        return [action for count, action in counts if count == fewest]
 
     # ------------------------------------------------------------------
     # get_action — điểm vào thuật toán (gọi qua choose_action của BaseAgent)
@@ -381,11 +490,12 @@ class RuleBasedAgent(BaseAgent):
 
         if win_actions:
             best = self._choose_best(win_actions, board, player)
+            best = (int(best[0]), int(best[1]))
             self.last_decision_info = {
                 "rule_triggered": "win_now",
                 "selected_action": best,
                 "candidate_count": len(win_actions),
-                "matching_actions": list(win_actions),
+                "matching_actions": [(int(r), int(c)) for r, c in win_actions],
                 "reason": (
                     f"Thắng ngay tại {best} — tìm thấy {len(win_actions)} "
                     "nước thắng, chọn theo tie-breaking."
@@ -402,12 +512,41 @@ class RuleBasedAgent(BaseAgent):
         self.stats["nodes_visited"] += total_empty
 
         if block_actions:
-            best = self._choose_best(block_actions, board, player)
+            pool = block_actions
+            if len(block_actions) > 1:
+                # Nếu đối thủ có nhiều nước thắng (đe dọa kép hoặc hai đường giao nhau),
+                # ưu tiên nước chặn triệt tiêu nhiều đường thắng nhất (để lại ít đường thắng nhất).
+                counts: list[tuple[int, Action]] = []
+                for r, c in block_actions:
+                    if self._should_stop_scanning():
+                        break
+                    board_after = board.copy()
+                    board_after[r, c] = player
+                    total_rem_lines = 0
+                    timed_out = False
+                    for nr, nc in block_actions:
+                        if (nr, nc) == (r, c):
+                            continue
+                        if self._should_stop_scanning():
+                            timed_out = True
+                            break
+                        total_rem_lines += _count_winning_lines(
+                            board_after, nr, nc, opponent
+                        )
+                    if timed_out:
+                        break
+                    counts.append((total_rem_lines, (int(r), int(c))))
+                if counts:
+                    fewest_rem = min(cnt for cnt, _ in counts)
+                    pool = [act for cnt, act in counts if cnt == fewest_rem]
+
+            best = self._choose_best(pool, board, player)
+            best = (int(best[0]), int(best[1]))
             self.last_decision_info = {
                 "rule_triggered": "block_urgent",
                 "selected_action": best,
                 "candidate_count": len(block_actions),
-                "matching_actions": list(block_actions),
+                "matching_actions": [(int(r), int(c)) for r, c in block_actions],
                 "reason": (
                     f"Chặn thua tại {best} — đối thủ có {len(block_actions)} "
                     "đe dọa thắng ngay, chặn theo tie-breaking."
@@ -459,20 +598,68 @@ class RuleBasedAgent(BaseAgent):
                     "Chặn đối thủ tạo ba quân mở (open three)",
                 ),
             )
+            # Chuẩn bị sẵn nước dự phòng hợp lệ trước khi quét pattern
+            fallback_scored = [
+                (positional_score(board, r, c, player), (r, c))
+                for r, c in candidates
+            ]
+            fallback_best_score = max(score for score, _ in fallback_scored)
+            fallback_top_group = [
+                action
+                for score, action in fallback_scored
+                if score == fallback_best_score
+            ]
+            fallback_best = self._choose_best(candidates, board, player)
+
             for rule_label, check_fn, target_player, desc_vi in pattern_tiers:
-                self.stats["nodes_visited"] += len(candidates)
-                matching_actions = [
-                    (r, c)
-                    for r, c in candidates
-                    if check_fn(board, r, c, target_player)
-                ]
+                matching_actions: list[Action] = []
+                timed_out = False
+                for r, c in candidates:
+                    # Kiểm tra mốc dừng thời gian trước mỗi ứng viên
+                    if self._should_stop_scanning():
+                        timed_out = True
+                        break
+                    self.stats["nodes_visited"] += 1
+                    if check_fn(board, r, c, target_player):
+                        matching_actions.append((r, c))
+
+                if timed_out and not matching_actions:
+                    # Hết giờ mà chưa có nước phù hợp → trả ngay nước dự phòng
+                    self.last_decision_info = {
+                        "rule_triggered": "positional_fallback",
+                        "selected_action": fallback_best,
+                        "candidate_count": len(candidates),
+                        "matching_actions": list(fallback_top_group),
+                        "reason": (
+                            f"Hết thời gian hợp tác khi quét pattern — dự phòng "
+                            f"vị trí tại {fallback_best} trong {len(candidates)} "
+                            f"ứng viên bán kính {self.candidate_radius}."
+                        ),
+                    }
+                    return fallback_best
+
                 if matching_actions:
-                    best = self._choose_best(matching_actions, board, player)
+                    pool = matching_actions
+                    # Tầng chặn: ưu tiên nước để lại ít cơ hội nguy hiểm nhất cho đối thủ
+                    if (
+                        not timed_out
+                        and target_player == opponent
+                        and len(matching_actions) > 1
+                    ):
+                        pool = self._least_counterplay_actions(
+                            matching_actions,
+                            board,
+                            player,
+                            candidates,
+                            rule_label=rule_label,
+                        )
+                    best = self._choose_best(pool, board, player)
+                    best = (int(best[0]), int(best[1]))
                     self.last_decision_info = {
                         "rule_triggered": rule_label,
                         "selected_action": best,
                         "candidate_count": len(candidates),
-                        "matching_actions": list(matching_actions),
+                        "matching_actions": [(int(r), int(c)) for r, c in matching_actions],
                         "reason": (
                             f"{desc_vi} tại {best} — tìm thấy "
                             f"{len(matching_actions)} nước phù hợp trong "
@@ -488,13 +675,14 @@ class RuleBasedAgent(BaseAgent):
         self.stats["nodes_visited"] += len(candidates)
 
         best = self._choose_best(candidates, board, player)
+        best = (int(best[0]), int(best[1]))
         scored_candidates = [
             (positional_score(board, r, c, player), (r, c))
             for r, c in candidates
         ]
         best_pos_score = max(score for score, _ in scored_candidates)
         top_group = [
-            action
+            (int(action[0]), int(action[1]))
             for score, action in scored_candidates
             if score == best_pos_score
         ]

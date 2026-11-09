@@ -376,7 +376,7 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 - [ ] Không đưa vào Git các file không liên quan, thư mục môi trường ảo (`.venv`) hoặc dữ liệu có dung lượng lớn.
 - [ ] Nhóm trưởng xác nhận kiểm thử tích hợp thành công trước khi chính thức nghiệm thu phần việc.
 
-*Trạng thái tài liệu: Giai đoạn 1 & Giai đoạn 2 hoàn thành — tác tử, bộ test (120/120 PASSED) và notebook (Phần 1–6) đã xác nhận. Giai đoạn 3 chờ triển khai.*
+*Trạng thái tài liệu: Giai đoạn 1 & Giai đoạn 2 hoàn thành — tác tử, bộ test (127/127 PASSED) và notebook (Phần 1–6) đã xác nhận. Giai đoạn 3 chờ triển khai.*
 
 ---
 
@@ -428,7 +428,12 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
   6. `attack_open_three` (quét trên `candidates`)
   7. `block_open_three` (quét trên `candidates`)
   8. `positional_fallback` (quét trên `candidates`)
-- **Truy vết và thống kê:** Mỗi tầng pattern được duyệt cộng thêm `len(candidates)` vào `stats["nodes_visited"]`; `explain_last_action()` trả về đầy đủ 5 khóa (`rule_triggered`, `selected_action`, `candidate_count`, `matching_actions`, `reason` tiếng Việt).
+- **Truy vết và thống kê:** Mỗi ứng viên thực sự được kiểm tra ở tầng pattern cộng 1 vào `stats["nodes_visited"]` (quét đủ một tầng = `len(candidates)`); `explain_last_action()` trả về đầy đủ 5 khóa (`rule_triggered`, `selected_action`, `candidate_count`, `matching_actions`, `reason` tiếng Việt), trong đó `matching_actions` là bản sao riêng (người gọi sửa list không ảnh hưởng dữ liệu nội bộ).
+- **Điều chỉnh theo góp ý Reviewer & Tự rà soát chuyên sâu (Self-Audit):**
+  1. Tầng chặn (`block_open_four`, `block_open_three`) khi có nhiều nước phù hợp sẽ thử đặt quân lên bản sao bàn cờ và giữ nhóm nước để lại ít cơ hội nguy hiểm nhất cho đối thủ (`block_open_four` đếm `creates_open_four`, `block_open_three` đếm cả `creates_open_four` và `creates_open_three`), rồi mới phá hòa theo `_choose_best` (ví dụ O có `(0,1)–(0,3)` và `(1,0)–(3,0)`: X chọn `(0,0)` thay vì `(0,4)`).
+  2. Tầng `block_urgent`: khi đối thủ có nhiều đe dọa thắng ngay giao nhau, ưu tiên nước chặn triệt tiêu nhiều đường thắng nhất (`_count_winning_lines`), đảm bảo phá vỡ các đòn tấn công kép nếu có điểm giao cắt.
+  3. Trước khi quét pattern, tác tử chuẩn bị sẵn nước dự phòng; mốc dừng hợp tác 1.9 giây (`COOPERATIVE_TIME_LIMIT_S`, trên hạn cứng 2.0 giây ở chế độ `time`) được kiểm tra trước mỗi ứng viên và bên trong vòng lặp đánh giá phản đòn `_least_counterplay_actions`. Hết giờ mà chưa có nước phù hợp thì trả ngay nước dự phòng (`positional_fallback`); đã có nước phù hợp thì chọn từ nhóm đó.
+  4. Chuẩn hóa toàn bộ tọa độ trong `explain_last_action()` thành `tuple[int, int]` kiểu `int` thuần Python, đảm bảo sao chép sâu chống rò rỉ trạng thái.
 
 ### Thông số cấu hình đã xác nhận
 - `candidate_radius = 2` (áp dụng cho tầng 3–8 khi `use_patterns=True`)
@@ -441,6 +446,6 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 - **Phạm vi ứng viên bán kính 2 và chi phí lồng nhau:** Các tầng pattern (tầng 3–7) chỉ duyệt trên `candidate_actions(radius=2)` để giữ thời gian suy nghĩ ~1–4 ms/nước (do `creates_open_three` gọi kiểm tra `creates_open_four` sâu 1 bước), nên có thể bỏ qua một số nước nhảy cách xa đám quân hiện có hơn 2 ô.
 
 ### Kết quả kiểm thử
-- `tests/test_rule_based_agent.py`: **120/120 PASSED** (48 ca Giai đoạn 1 + 72 ca Giai đoạn 2 tại `TestPatternRecognition`, `TestPatternPriorityAndConflict`, `TestDoubleThreatAndPatternContract`).
-- `pytest tests -v` (toàn dự án): **202/202 PASSED** (100%).
+- `tests/test_rule_based_agent.py`: **127/127 PASSED** (48 ca Giai đoạn 1 + 72 ca Giai đoạn 2 + 3 ca Reviewer + 4 ca Tự rà soát chuyên sâu tại `TestSelfAuditAndHardening`).
+- `pytest tests -v` (toàn dự án): **209/209 PASSED** (100%).
 - `notebooks/01_rule_based.ipynb`: Hoàn thiện Phần 1–6 (17 code cells thực thi tuần tự không lỗi, 18 kịch bản Phần 4 + 9 mẫu đối chứng Phần 5 + 8 kịch bản xung đột/truy vết Phần 6 đều đạt **100% PASS**).

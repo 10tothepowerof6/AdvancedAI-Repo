@@ -1489,3 +1489,203 @@ class TestDoubleThreatAndPatternContract:
         np.testing.assert_array_equal(
             board, snapshot, err_msg="Tầng pattern đã sửa đổi mảng board đầu vào"
         )
+
+
+# ===========================================================================
+# PHẦN 10 — Điều chỉnh theo góp ý của Reviewer
+# ===========================================================================
+
+class TestReviewerFeedback:
+    """Kiểm tra 3 điều chỉnh từ Reviewer: sao chép sâu, chặn tối ưu, mốc dừng thời gian."""
+
+    def test_explain_last_action_sao_chep_sau_matching_actions(self):
+        """Sửa list trả về từ explain_last_action() không được làm hỏng dữ liệu nội bộ."""
+        # Arrange
+        board = _scenario_board("attack_open_four", PLAYER_X)
+        agent = RuleBasedAgent(use_patterns=True)
+        agent.choose_action(board, PLAYER_X)
+        info = agent.explain_last_action()
+        expected = list(info["matching_actions"])
+        assert expected, "Điều kiện tiên quyết: matching_actions phải khác rỗng"
+
+        # Act
+        info["matching_actions"].clear()
+        info_again = agent.explain_last_action()
+
+        # Assert
+        assert info_again["matching_actions"] == expected, (
+            "matching_actions nội bộ đã bị sửa qua bản sao trả về (copy nông)"
+        )
+        assert info_again["matching_actions"] is not info["matching_actions"]
+
+    def test_chan_open_four_chon_nuoc_de_lai_it_co_hoi_nhat(self):
+        """O có (0,1)-(0,3) và (1,0)-(3,0): X phải chọn (0,0) chặn cả hai hướng."""
+        # Arrange: quân X rời rạc, không tạo đe dọa riêng; (1, 5) làm (0, 4) có
+        # điểm vị trí cao hơn (0, 0) để phép chọn chỉ theo điểm vị trí sẽ chọn sai
+        o_stones = [(0, 1), (0, 2), (0, 3), (1, 0), (2, 0), (3, 0)]
+        x_stones = [(6, 6), (10, 9), (1, 5), (9, 2), (5, 3), (8, 10)]
+        board = _build_turn_board(PLAYER_X, x_stones, o_stones)
+        snapshot = board.copy()
+        agent = RuleBasedAgent(use_patterns=True)
+
+        # Act
+        action = agent.choose_action(board, PLAYER_X)
+        info = agent.explain_last_action()
+
+        # Assert
+        assert info["rule_triggered"] == "block_open_four"
+        assert (0, 4) in info["matching_actions"] and (4, 0) in info["matching_actions"]
+        assert action == (0, 0), (
+            f"Phải chọn (0, 0) để chặn cả hai hướng, nhận {action}"
+        )
+        np.testing.assert_array_equal(board, snapshot)
+
+    def test_het_gio_giua_chung_luc_quet_pattern_tra_nuoc_du_phong(self, monkeypatch):
+        """Hết giờ giữa chừng: dừng quét ngay và trả về nước dự phòng đã chuẩn bị sẵn."""
+        # Arrange: thế cờ không có pattern nào → quét hết sẽ rơi xuống fallback
+        board = _build_turn_board(PLAYER_X, [(5, 5)], [(5, 6)])
+        total_empty = int(np.count_nonzero(board == EMPTY))
+        budget = rule_based_module.SearchBudget(mode="time", time_limit_s=2.0)
+        agent_full = RuleBasedAgent(use_patterns=True)
+        agent_limited = RuleBasedAgent(use_patterns=True, budget=budget)
+        calls = {"n": 0}
+
+        def fake_time_exhausted() -> bool:
+            calls["n"] += 1
+            return calls["n"] > 12
+
+        monkeypatch.setattr(agent_limited, "time_exhausted", fake_time_exhausted)
+
+        # Act
+        full_action = agent_full.choose_action(board, PLAYER_X)
+        limited_action = agent_limited.choose_action(board, PLAYER_X)
+        info = agent_limited.explain_last_action()
+
+        # Assert
+        full_nodes = agent_full.stats["nodes_visited"]
+        limited_nodes = agent_limited.stats["nodes_visited"]
+        assert limited_nodes < full_nodes, "Hết giờ phải quét ít ứng viên hơn"
+        assert limited_nodes - 2 * total_empty <= 12, (
+            "Chỉ được đếm node cho ứng viên thực sự đã kiểm tra"
+        )
+        assert info["rule_triggered"] == "positional_fallback"
+        assert limited_action == full_action
+        assert board[limited_action] == EMPTY
+
+
+# ===========================================================================
+# PHẦN 11 — Tự rà soát chuyên sâu (Self-Audit & Hardening)
+# ===========================================================================
+
+class TestSelfAuditAndHardening:
+    """Kiểm toán toàn diện: Kiểu dữ liệu thuần, chặn tối ưu block_open_three và block_urgent, dừng thời gian."""
+
+    def test_explain_last_action_pure_python_ints_and_deep_copy(self):
+        """Mọi tọa độ trong explain_last_action() phải là int thuần Python và bất biến với sửa đổi ngoài."""
+        # Arrange
+        board = _scenario_board("attack_open_four", PLAYER_X)
+        agent = RuleBasedAgent(use_patterns=True)
+        agent.choose_action(board, PLAYER_X)
+
+        # Act
+        info = agent.explain_last_action()
+        sel = info["selected_action"]
+        matches = info["matching_actions"]
+
+        # Assert: kiểu int thuần (không phải numpy int)
+        assert isinstance(sel, tuple) and len(sel) == 2
+        assert type(sel[0]) is int and type(sel[1]) is int
+        for r, c in matches:
+            assert isinstance((r, c), tuple) and len((r, c)) == 2
+            assert type(r) is int and type(c) is int
+
+        # Assert: sửa đổi dict và list trả về không đổi dữ liệu nội bộ
+        matches.clear()
+        info["selected_action"] = (-99, -99)
+        fresh_info = agent.explain_last_action()
+        assert len(fresh_info["matching_actions"]) > 0
+        assert fresh_info["selected_action"] == sel
+
+    def test_block_open_three_uu_tien_nuoc_de_lai_it_co_hoi_nhat(self):
+        """O có hai đường 2 quân (3,4)-(3,5) và (4,3)-(5,3) giao nhau tại (3,3).
+        X phải chọn (3,3) để triệt tiêu cả hai hướng tạo open-three của O,
+        thay vì chọn (3,6) dù (3,6) có quân đồng minh X ở (3,8) kéo điểm vị trí cao hơn.
+        """
+        # Arrange
+        board = np.zeros((11, 11), dtype=np.int8)
+        board[3, 4] = PLAYER_O
+        board[3, 5] = PLAYER_O
+        board[4, 3] = PLAYER_O
+        board[5, 3] = PLAYER_O
+        # X có quân đồng minh ở (3,8) để (3,6) có điểm vị trí cao hơn (3,3)
+        board[3, 8] = PLAYER_X
+        board[8, 2] = PLAYER_X
+        board[9, 9] = PLAYER_X
+        board[10, 10] = PLAYER_X
+
+        agent = RuleBasedAgent(use_patterns=True)
+
+        # Act
+        action = agent.choose_action(board, PLAYER_X)
+        info = agent.explain_last_action()
+
+        # Assert
+        assert info["rule_triggered"] == "block_open_three"
+        assert action == (3, 3), f"Phải chọn (3, 3) để triệt tiêu cả hai hướng open-three, nhận {action}"
+
+    def test_block_urgent_uu_tien_nuoc_chan_triet_tieu_nhieu_de_doa_nhat(self):
+        """O có hai đường 4 quân: đường ngang (1,1)-(1,4) (threats tại (1,0) và (1,5))
+        và đường dọc (2,5)-(5,5) bị chặn ở (6,5) (threat duy nhất tại (1,5)).
+        X phải chọn (1,5) vì để lại 0 nước thắng cho O, thay vì (1,0) dù (1,0) có điểm vị trí cao hơn.
+        """
+        # Arrange
+        board = np.zeros((11, 11), dtype=np.int8)
+        for c in range(1, 5):
+            board[1, c] = PLAYER_O
+        for r in range(2, 6):
+            board[r, 5] = PLAYER_O
+        board[6, 5] = PLAYER_X  # chặn đầu dưới của đường dọc
+
+        # Quân X gần (1,0) để (1,0) có điểm vị trí cao hơn (1,5)
+        board[0, 0] = PLAYER_X
+        board[2, 0] = PLAYER_X
+        board[0, 1] = PLAYER_X
+        board[2, 1] = PLAYER_X
+        board[0, 2] = PLAYER_X
+        board[9, 9] = PLAYER_X
+        board[10, 10] = PLAYER_X
+
+        o_threats = find_winning_actions(board, PLAYER_O)
+        assert set(o_threats) == {(1, 0), (1, 5)}
+
+        agent = RuleBasedAgent(use_patterns=True)
+
+        # Act
+        action = agent.choose_action(board, PLAYER_X)
+        info = agent.explain_last_action()
+
+        # Assert
+        assert info["rule_triggered"] == "block_urgent"
+        assert action == (1, 5), f"Phải chọn (1, 5) để triệt tiêu hoàn toàn nước thắng của O, nhận {action}"
+
+    def test_least_counterplay_dung_thoi_gian_an_toan(self, monkeypatch):
+        """Khi _should_stop_scanning kích hoạt trong _least_counterplay_actions, agent không bị treo."""
+        # Arrange
+        o_stones = [(0, 1), (0, 2), (0, 3), (1, 0), (2, 0), (3, 0)]
+        x_stones = [(6, 6), (10, 9), (1, 5), (9, 2), (5, 3), (8, 10)]
+        board = _build_turn_board(PLAYER_X, x_stones, o_stones)
+        agent = RuleBasedAgent(use_patterns=True)
+
+        # Giả lập hết giờ sau 1 lần kiểm tra
+        call_count = {"cnt": 0}
+
+        def mock_should_stop():
+            call_count["cnt"] += 1
+            return call_count["cnt"] > 3
+
+        monkeypatch.setattr(agent, "_should_stop_scanning", mock_should_stop)
+
+        # Act & Assert: gọi bình thường không sinh lỗi và trả về nước hợp lệ
+        action = agent.choose_action(board, PLAYER_X)
+        assert isinstance(action, tuple) and len(action) == 2
+        assert board[action] == EMPTY
