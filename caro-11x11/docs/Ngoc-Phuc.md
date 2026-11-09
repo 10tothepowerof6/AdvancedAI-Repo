@@ -381,7 +381,7 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 - [ ] Không đưa vào Git các file không liên quan, thư mục môi trường ảo (`.venv`) hoặc dữ liệu có dung lượng lớn.
 - [ ] Nhóm trưởng xác nhận kiểm thử tích hợp thành công trước khi chính thức nghiệm thu phần việc.
 
-*Trạng thái tài liệu: Giai đoạn 1 đã merge (PR #17). Giai đoạn 2 đã cài đặt và kiểm thử, chờ mở PR. Giai đoạn 3 chưa thực hiện.*
+*Trạng thái tài liệu: Giai đoạn 1 đã merge (PR #17). Giai đoạn 2 đã mở PR #20 và sửa theo review, chờ duyệt lại. Giai đoạn 3 chưa thực hiện.*
 
 ---
 
@@ -438,7 +438,7 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 
 ## 13. Nhật ký thực hiện - Giai đoạn 2
 
-### Trạng thái: Đã cài đặt và kiểm thử, chờ mở PR
+### Trạng thái: Đã mở PR #20, đã sửa theo review, chờ duyệt lại
 
 ### Thành phần đã cài đặt (`agents/minimax_agent.py`)
 | Thành phần | Vai trò |
@@ -462,7 +462,7 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 - Bản Minimax tham chiếu và Alpha-Beta tham chiếu viết độc lập trong file test (duyệt hết, thứ tự hàng/cột) để đối chiếu.
 - Chiến thuật: thắng ngay cho X và O ở độ sâu 1/2/3, chặn chuỗi 4 cho X và O ở độ sâu 2, ưu tiên thắng thay vì chặn khi cả hai cùng có 4.
 - Giá trị gốc khớp tham chiếu ở độ sâu 1, 2 (và 3 trên cây nhỏ), cho cả 4 tổ hợp bật/tắt cắt tỉa và sắp xếp; nước trả về đạt đúng giá trị gốc.
-- Bật/tắt Alpha-Beta: cùng giá trị, cùng nước, số nút không tăng (12 vị trí × 2 thứ tự); số nút và số lần cắt khớp chính xác bản tham chiếu, kể cả trường hợp `alpha >= beta` ở nước con cuối (không tính là cắt).
+- Bật/tắt Alpha-Beta: cùng giá trị, cùng nước, số nút không tăng (6 vị trí × độ sâu 1, 2 × 2 thứ tự xét = 24 ca); số nút và số lần cắt khớp chính xác bản tham chiếu, kể cả trường hợp `alpha >= beta` ở nước con cuối (không tính là cắt).
 - Số nút khi tắt cắt tỉa đúng bằng cây duyệt hết, chứng minh dừng đúng độ sâu và không mở rộng nút terminal.
 - Trọng số: trọng số sai bị từ chối ở cả searcher và tác tử; bàn 4×4 luật 4 quân với cận `WIN_SCORE - 15` được `evaluate()` nhận nhưng search từ chối vì không chừa đủ biên ply; trọng số mặc định cho đúng nước thắng trên các luật 3×3, 6×6 luật 4, 11×11 luật 5; mặc định cho cùng kết quả với truyền `WINDOW_WEIGHTS`.
 - Tác tử: nước hợp lệ, bàn cờ gốc giữ nguyên, thống kê đặt lại mỗi lượt, chơi trọn ván với Random (độ sâu 1 và 2), chế độ `time` trả đúng giá trị của độ sâu đã hoàn tất, dùng nước dự phòng khi hết giờ, dừng sớm khi đã thắng chắc.
@@ -479,3 +479,13 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 - Biên 0,1 s mới kiểm chứng trên một máy (số liệu phần 6.1); máy chậm hơn có thể cần biên lớn hơn.
 - Sắp xếp nước dùng heuristic tĩnh; chưa có bảng chuyển vị (transposition table) hay killer move.
 - Tập ứng viên bán kính 2 có thể bỏ sót nước xa cụm quân.
+
+### Sửa theo review PR #20
+| Góp ý | Cách sửa | Test bổ sung |
+| :--- | :--- | :--- |
+| Khi bật sắp xếp nước, `ordered_moves` tạo và chấm điểm cả nhóm ứng viên rồi mới kiểm tra hạn dừng (đo được: hết giờ ngay từ đầu vẫn chấm 99/99 nước gốc). | Kiểm tra `should_stop()` trước khi sinh và chấm từng nước con; hết giờ báo `SearchTimeout` ngay. Phần kiểm tra được gom vào `_check_stop()` dùng chung với `_minimax`. Thứ tự sắp xếp và kết quả tìm kiếm không đổi. | Hạn dừng báo hết giờ ở lần kiểm tra thứ 3 thì chỉ chấm 2 nước; hết giờ từ đầu thì không chấm nước gốc nào; chưa tới hạn thì kết quả, số nút, số lần cắt giữ nguyên; đồng hồ giả cho tác tử chế độ `time` dừng giữa lúc chấm nước gốc ở độ sâu 2 và giữ kết quả độ sâu 1. |
+| Ván đã có người thắng nhưng bàn còn ô trống thì tác tử vẫn trả về một ô trống. | `get_action` báo `ValueError` ngay khi trạng thái đã kết thúc; bỏ nhánh tự chọn ô trống. Ván chưa kết thúc luôn có ô trống kề một quân nên tập ứng viên không rỗng. | Gọi qua `choose_action()` trên ván X thắng và ván O thắng, cho cả hai bên, ở cả chế độ `fixed` và `time`: đều báo `ValueError`, bàn cờ đầu vào giữ nguyên. |
+
+- Toàn bộ test của dự án: 501 pass (trước khi sửa: 491).
+- Đã cố ý cài lại từng lỗi (bỏ kiểm tra hạn khi chấm nước, chỉ kiểm tra sau khi đã chấm hết, ván kết thúc vẫn trả ô trống): cả 3 đều bị test bắt.
+- Notebook chạy lại với code mới cho giá trị, nước đi, số nút và số lần cắt giống hệt bản đã commit; chỉ các số đo thời gian lệch vài mili giây như mọi lần chạy, nên không commit lại notebook.
