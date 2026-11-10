@@ -505,3 +505,82 @@ chọn theo Q/N thay vì N, đếm mô phỏng bị bỏ, rollout từ trạng t
   kiểm tra `ValueError` của MCTS chỉ có hiệu lực khi gọi `search()` trực tiếp.
 
 *Trạng thái tài liệu: Giai đoạn 1–2 đã cài đặt và kiểm thử cục bộ; Giai đoạn 3 chưa thực hiện.*
+
+---
+
+## 13. Phân công bổ sung — Task 1 Rule-based
+
+**Phụ trách.** Phi Hùng (`@phi10hung`) · [Issue #7 — Hoàn thiện luật thắng ngay và chặn thua](https://github.com/10tothepowerof6/AdvancedAI-Repo/issues/7).
+
+Đây là đầu việc bổ sung, thực hiện trên nhánh riêng với MCTS. Mục tiêu là đưa bản Rule-based cơ bản chạy được trọn ván lên `main`. Bản này là nền tảng để Ngọc Phúc mở rộng pattern ở Task 2 và là bản đối chứng khi đánh giá tác dụng của pattern ở Task 3.
+
+### 13.1. Điểm bắt đầu và phạm vi chỉnh sửa
+
+Tạo nhánh `feature/rule-based-task-1` từ `main` mới nhất. Agent và test Rule-based trên `main` hiện là file khung. Đọc `BaseAgent`, `CaroGame` và tiện ích `candidate_actions` để nắm hợp đồng chung trước khi triển khai.
+
+| File | Phần phụ trách |
+| :--- | :--- |
+| `agents/rule_based_agent.py` | Lớp `RuleBasedAgent`, các hàm nhận diện thắng và chặn, chọn nước dự phòng, truy vết quyết định. |
+| `tests/test_rule_based_agent.py` | Test độc lập cho hàm chiến thuật, thứ tự luật, hợp đồng agent và một ván hoàn chỉnh. |
+| `notebooks/01_rule_based.ipynb` | Hoàn thiện phần 1–4. Giữ phần 5–10 ở trạng thái chưa thực hiện. |
+| `docs/Phi-Hung.md` | Ghi ngắn gọn quyết định thiết kế, lệnh kiểm thử và giới hạn thực tế tại mục này. |
+
+`core/`, `config/`, `BaseAgent`, `RandomAgent`, `agents/__init__.py`, `evaluation/`, test chung và `requirements.txt` do nhóm trưởng quản lý. Import agent trực tiếp từ module Rule-based. Chú thích, đầu ra, notebook và phần diễn giải trong commit hoặc PR dùng tiếng Việt.
+
+### 13.2. Hợp đồng tích hợp và hướng triển khai
+
+- **Luật cờ.** Bàn 11×11, X = `1`, O = `-1`, ô trống = `0`. Từ 5 quân liên tiếp theo hàng, cột hoặc hai đường chéo là thắng, kể cả chuỗi dài hơn 5 hoặc bị chặn hai đầu. Bàn đầy mà chưa có bên thắng là hòa.
+- **Giao diện.** Kế thừa `BaseAgent`, truyền `SearchBudget` xuống lớp cha và cài `get_action(board, player)`. Runner, notebook và test tích hợp gọi `choose_action(board, player)` trên ván đang diễn ra. Trả `(row, col)` gồm hai số nguyên Python, đánh số từ 0. Mọi phép thử nước đi phải bảo toàn bàn cờ đầu vào.
+- **Tổ chức.** Tách nhận diện nước thắng, thu thập nước thỏa điều kiện, lượng giá vị trí và chọn nước cuối để kiểm thử riêng. Notebook chỉ gọi module và trình bày kết quả.
+
+| Thứ tự | Luật | Phạm vi và cách quyết định |
+| :--- | :--- | :--- |
+| 1 | `win_now` | Xét tất cả ô trống cho bên đang đi. Nếu có nước thắng, chọn trong nhóm nước thắng và kết thúc lượt. |
+| 2 | `block_urgent` | Khi chưa thắng ngay, xét tất cả ô trống cho đối thủ. Nếu đối thủ có đúng một ô thắng, chiếm ô đó. Nếu có nhiều ô thắng độc lập, chỉ có thể chặn một ô trong lượt này. |
+| 3 | `positional_fallback` | Khi chưa có đe dọa trực tiếp, dùng tập ứng viên bán kính 2 của `candidate_actions`. Xây dựng điểm vị trí từ độ gần tâm và quân lân cận. Xử lý riêng bàn trống hoặc chỉ còn một ô để luôn có nước hợp lệ. |
+
+- **Phá hòa.** Công bố công thức điểm, thứ tự tiêu chí phụ và quy tắc cuối cùng khi nhiều nước bằng điểm. Có thể dùng thứ tự hàng/cột để giữ tính tất định. Nếu chọn ngẫu nhiên, dùng seed riêng của agent và kiểm tra khả năng tái lập.
+- **Ngân sách.** `fixed` chạy đủ các luật cần xét để ra quyết định. `time` có hạn cứng mặc định 2,0 giây do runner cưỡng chế. Chuẩn bị sẵn nước hợp lệ dự phòng và kiểm tra mốc dừng giữa các ứng viên khi quét, kể cả khi hạn ngắn hơn mặc định. Mốc khởi đầu đề xuất là khoảng 1,9 giây với hạn 2,0 giây. Khi ngân sách ngắn, biên an toàn cần phù hợp với hạn thực tế. `time_exhausted()` kiểm tra hạn cứng và không tự trừ biên. Ghi đúng trường hợp dùng nước dự phòng do hết ngân sách.
+- **Truy vết.** Tách `explain_last_action()` khỏi đầu ra tọa độ. Ghi tên luật, nước chọn, số ứng viên đã xét ở tầng quyết định, danh sách nước khớp và lý do. Trả bản sao độc lập của dữ liệu có thể sửa, kể cả danh sách `matching_actions`. Định nghĩa `nodes_visited` theo số ứng viên thật sự đã kiểm tra ở mỗi tầng, kể cả tầng dừng giữa chừng. `simulations` và `pruned_nodes` để 0. `thinking_time` do `BaseAgent` đo.
+
+### 13.3. Khung notebook phần 1–4
+
+| Phần | Nội dung cần có |
+| :--- | :--- |
+| 1. Câu hỏi và phạm vi | Nêu baseline gồm thắng ngay, chặn thua và điểm vị trí. Đặt câu hỏi liệu pattern có cải thiện chất lượng nước đi khi bổ sung ở giai đoạn sau. |
+| 2. Môi trường và cấu hình | Ghi Python, thư viện, bảng ưu tiên, điểm vị trí, bán kính, ngân sách và seed nếu có. Tập trung cấu hình ở đầu notebook. |
+| 3. Bộ vị trí chiến thuật | Dựng bàn bằng chuỗi nước hợp lệ qua `CaroGame.step()`. Hiển thị bàn, bên đến lượt, tập nước chấp nhận được và lý do trước khi chạy. |
+| 4. Kiểm chứng thắng và chặn | Import agent từ module, chạy các thế ngang, dọc, hai chéo, sát mép, nối dài hơn 5 và thế có cả cơ hội thắng lẫn đe dọa thua. Đối chiếu kỳ vọng với nước đi và lý do thực tế. |
+
+Mỗi phần có mục tiêu, kết quả chạy thật và nhận xét ngắn. Chạy lại notebook theo thứ tự từ kernel mới.
+
+### 13.4. Cách viết test và tiêu chí đạt
+
+- [ ] Dựng fixture bằng `CaroGame.step()` cho test tích hợp. Xác định trước bên đến lượt và tập nước đúng bằng luật hoặc tính tay. Khi nhiều nước tương đương, kiểm tra nước được chọn thuộc tập hợp lệ theo tiêu chí đã công bố.
+- [ ] Test thắng và chặn ở bốn hướng cho cả X và O, có ca sát biên, chuỗi dài hơn 5, chuỗi bị chặn hai đầu và mẫu tương tự nhưng chưa đủ để thắng.
+- [ ] Có ca hai bên cùng có nước thắng để xác nhận ưu tiên `win_now`. Có ca chỉ một ô cần chặn để xác nhận `block_urgent`. Với hai ô thắng độc lập, ghi nhận giới hạn phòng thủ của một lượt.
+- [ ] Kiểm tra bàn trống, bàn chỉ còn một ô, đầu ra là tuple hai số nguyên và bàn đầu vào nguyên vẹn. Kiểm tra phá hòa tất định hoặc tái lập theo seed đã công bố.
+- [ ] Sửa hoặc xóa phần tử trong `matching_actions` của bản trả về rồi đọc lại để xác nhận truy vết của agent vẫn đúng. Dùng đồng hồ giả kiểm tra hết ngân sách giữa lúc quét và vẫn có nước dự phòng hợp lệ.
+- [ ] Chơi trọn ít nhất một ván với `RandomAgent`. Chạy test riêng, toàn bộ suite và notebook từ kernel mới. Ghi số test đạt/thất bại, fixture, cấu hình và giới hạn thực tế trong PR.
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_rule_based_agent.py -v
+.\.venv\Scripts\python.exe -m pytest tests -v
+```
+
+### 13.5. Nhánh, cột mốc commit và PR
+
+Từ thư mục `caro-11x11`, kiểm tra `git status`, lưu công việc đang làm trên nhánh hiện tại rồi chuyển sang `main`, chạy `git pull --ff-only origin main` và chạy `git switch -c feature/rule-based-task-1`.
+
+| Cột mốc | File được stage | Commit đề xuất |
+| :--- | :--- | :--- |
+| Luật cơ bản chạy được qua API | `agents/rule_based_agent.py` | `feat(rule-based): bổ sung luật thắng ngay, chặn thua và dự phòng` |
+| Kiểm thử chiến thuật và tích hợp đạt | `tests/test_rule_based_agent.py` | `test(rule-based): kiểm chứng luật chiến thuật và hợp đồng tác tử` |
+| Notebook phần 1–4 và ghi chú bàn giao | `notebooks/01_rule_based.ipynb`, `docs/Phi-Hung.md` | `docs(rule-based): minh họa và bàn giao tác tử chiến thuật cơ bản` |
+
+Stage đúng file của từng cột mốc, xem `git diff --cached`, commit rồi push. Lần đầu dùng `git push -u origin feature/rule-based-task-1`, các lần sau dùng `git push` trên cùng nhánh. Nếu cần review sớm, mở PR nháp và chỉ tham chiếu `#7`.
+
+- **Tiêu đề PR.** `feat(rule-based): bổ sung tác tử luật với chiến thuật thắng và chặn`.
+- **Mô tả PR.** Bổ sung baseline gồm thắng ngay, chặn thua và điểm vị trí dự phòng theo hợp đồng `BaseAgent`. Notebook phần 1–4 minh họa các thế chiến thuật. Kèm danh sách file, lệnh chạy, số test thực tế, fixture, kết quả ván kiểm chứng và giới hạn của baseline.
+- **Thông tin GitHub.** Base `main`, compare `feature/rule-based-task-1`, assignee `@phi10hung`, reviewer `@10tothepowerof6`, [milestone Báo cáo tiến độ nửa dự án](https://github.com/10tothepowerof6/AdvancedAI-Repo/milestone/2). Thêm `Closes #7` khi đủ tiêu chí nghiệm thu. Xử lý góp ý trên cùng nhánh và cập nhật kết quả kiểm thử sau mỗi lần sửa.
+- **Bàn giao sau merge.** Ghi rõ API khởi tạo agent, quy tắc phá hòa, cách đếm thống kê và các ca test cần giữ. Khi Task 1 đã vào `main`, Ngọc Phúc dùng chính phiên bản đó làm nền cho Task 2.

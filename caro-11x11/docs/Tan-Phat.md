@@ -2,10 +2,10 @@
 
 ## 1. Mục tiêu và tổ chức sản phẩm
 
-Mục tiêu chính là hoàn thiện tác tử dựa trên tập luật chiến thuật và nhận diện mẫu hình (**Rule-based**) cho cờ Caro 11×11, sẵn sàng tích hợp vào giải đấu chung và ứng dụng demo của dự án.
+> **Cập nhật phân công ngày 10/11/2026.** [Task 1 Rule-based](https://github.com/10tothepowerof6/AdvancedAI-Repo/issues/7) đã chuyển cho Phi Hùng (`@phi10hung`). [Task 2 Rule-based](https://github.com/10tothepowerof6/AdvancedAI-Repo/issues/8) đã chuyển cho Ngọc Phúc (`@PhucLee23`). Phạm vi Task 3 giữ theo kế hoạch ở mục 9 và bắt đầu sau khi Task 2 đã merge vào `main`.
 
-Mỗi giai đoạn thực hiện yêu cầu đầy đủ 4 thành phần cấu thành:
-- **Module mã nguồn:** Cài đặt thuật toán trong `agents/rule_based_agent.py`.
+Task 3 đánh giá tác dụng của mẫu hình trên phiên bản Rule-based đã tích hợp. Hồ sơ bàn giao gồm bốn thành phần sau.
+- **Module mã nguồn.** Dùng phiên bản `agents/rule_based_agent.py` đã tích hợp để đánh giá hai cấu hình.
 - **Kiểm thử tự động:** Xây dựng bộ test riêng trong `tests/test_rule_based_agent.py`.
 - **Thực nghiệm và trực quan hóa:** Trình bày quá trình đo lường, phân tích trong `notebooks/01_rule_based.ipynb`.
 - **Tài liệu theo dõi:** Cập nhật thiết kế, tiến độ và các hạn chế kỹ thuật trong `docs/Tan-Phat.md`.
@@ -19,10 +19,10 @@ Mỗi giai đoạn thực hiện yêu cầu đầy đủ 4 thành phần cấu t
 ### Phân công trách nhiệm theo file
 | File thao tác | Trách nhiệm chính |
 | :--- | :--- |
-| `agents/rule_based_agent.py` | Lớp `RuleBasedAgent` và các hàm nhận diện luật, pattern nội bộ |
-| `tests/test_rule_based_agent.py` | Bộ kiểm thử tự động riêng cho thuật toán |
-| `notebooks/01_rule_based.ipynb` | Kịch bản thí nghiệm, đo đạc số liệu và phân tích kết quả |
-| `docs/Tan-Phat.md` | Ghi nhận quyết định thiết kế, tiến độ thực hiện và giới hạn kỹ thuật |
+| `agents/rule_based_agent.py` | Dùng agent và hai cấu hình đã bàn giao sau Task 2. Đề xuất riêng nếu cần sửa thuật toán để phục vụ tích hợp. |
+| `tests/test_rule_based_agent.py` | Giữ test của Task 1–2 và bổ sung test đối chứng, log và số liệu Task 3. |
+| `notebooks/01_rule_based.ipynb` | Giữ phần 1–6, hoàn thiện phần 7–10 về thí nghiệm và phân tích kết quả. |
+| `docs/Tan-Phat.md` | Ghi cấu hình đánh giá, tiến độ và giới hạn thực tế của Task 3. |
 
 ### Quy ước phát triển và làm việc với Git
 - **Thư mục làm việc:** Mọi thao tác lệnh và đường dẫn tương đối đều tính từ thư mục gốc `caro-11x11`.
@@ -156,6 +156,8 @@ File `notebooks/01_rule_based.ipynb` được tổ chức tuần tự theo 10 ph
 
 ## 7. Giai đoạn 1 — Hoàn thiện luật thắng ngay và chặn thua
 
+> **Đã chuyển giao cho Phi Hùng (`@phi10hung`).** Theo dõi tiến độ tại [issue #7](https://github.com/10tothepowerof6/AdvancedAI-Repo/issues/7). Phần dưới ghi phạm vi kỹ thuật đã bàn giao.
+
 ### Mục tiêu và nhiệm vụ
 1. Cài đặt cơ chế kiểm tra nước đi thử nghiệm và nhận diện nước thắng theo 4 hướng mà không làm thay đổi mảng `board` gốc.
 2. Thiết lập mức độ ưu tiên tuyệt đối cho nước thắng ngay của bên đang đi trước khi xét đến việc phòng thủ; tìm kiếm đe dọa của đối thủ trên toàn bộ ô trống để tránh bỏ sót do giới hạn tập ứng viên.
@@ -181,38 +183,11 @@ File `notebooks/01_rule_based.ipynb` được tổ chức tuần tự theo 10 ph
 
 **Bằng chứng bắt buộc trong PR:** Lệnh kiểm thử đã chạy, số lượng test đạt/thất bại, danh sách fixture đã thử nghiệm và các hạn chế kỹ thuật đã biết.
 
-### Quy trình nhánh, commit và đẩy mã nguồn
-- **Tên nhánh:** `feature/rule-based-tactics` *(tạo từ main sau khi nền tảng chung sẵn sàng)*.
-
-<details>
-<summary>Lệnh thao tác Git (PowerShell)</summary>
-
-```powershell
-git status
-git switch main
-git pull --ff-only origin main
-git switch -c feature/rule-based-tactics
-
-# Thực hiện code và kiểm thử trước khi commit
-.\.venv\Scripts\python.exe -m pytest tests -v
-
-git add -- agents/rule_based_agent.py notebooks/01_rule_based.ipynb tests/test_rule_based_agent.py docs/Tan-Phat.md
-git diff --cached --stat
-git diff --cached
-git commit -m "feat(rule-based): bổ sung luật thắng ngay và chặn thua"
-git push -u origin feature/rule-based-tactics
-```
-
-</details>
-
-### Tiêu đề và mô tả PR Giai đoạn 1
-- **Tiêu đề PR:** `feat(rule-based): bổ sung tác tử luật với chiến thuật thắng và chặn`
-- **Mô tả nội dung mẫu:**
-  > Bổ sung phiên bản Rule-based tối thiểu với khả năng nhận diện nước thắng ngay và ngăn chặn đối thủ thắng ngay lập tức. Notebook trình bày chi tiết bảng thứ tự ưu tiên và các tình huống kiểm chứng thực tế. Các luật nhận diện pattern nâng cao sẽ được triển khai ở giai đoạn tiếp theo.
-
 ---
 
 ## 8. Giai đoạn 2 — Hoàn thiện Pattern và thứ tự ưu tiên
+
+> **Đã chuyển giao cho Ngọc Phúc (`@PhucLee23`).** Theo dõi tiến độ tại [issue #8](https://github.com/10tothepowerof6/AdvancedAI-Repo/issues/8). Phần dưới ghi phạm vi kỹ thuật đã bàn giao.
 
 ### Mục tiêu và nhiệm vụ
 1. Định nghĩa rõ ràng các hình thái cờ: bốn quân mở (open-four), ba quân mở (open-three), chuỗi có khoảng trống ở giữa và chuỗi bị chặn một đầu; không chỉ dựa đơn thuần vào tổng số lượng quân.
@@ -242,35 +217,6 @@ git push -u origin feature/rule-based-tactics
 - [ ] Cơ chế phá hòa hoạt động ổn định hoặc tái lập theo seed, đầu ra luôn tuân thủ nghiêm ngặt hợp đồng của `BaseAgent`.
 
 **Bằng chứng bắt buộc trong PR:** Lệnh kiểm thử đã chạy, số lượng test đạt/thất bại, danh sách fixture đã thử nghiệm và các hạn chế kỹ thuật đã biết.
-
-### Quy trình nhánh, commit và đẩy mã nguồn
-- **Tên nhánh:** `feature/rule-based-patterns` *(chỉ tạo sau khi PR Giai đoạn 1 đã được merge vào main)*.
-
-<details>
-<summary>Lệnh thao tác Git (PowerShell)</summary>
-
-```powershell
-git status
-git switch main
-git pull --ff-only origin main
-git switch -c feature/rule-based-patterns
-
-# Thực hiện code và kiểm thử trước khi commit
-.\.venv\Scripts\python.exe -m pytest tests -v
-
-git add -- agents/rule_based_agent.py notebooks/01_rule_based.ipynb tests/test_rule_based_agent.py docs/Tan-Phat.md
-git diff --cached --stat
-git diff --cached
-git commit -m "feat(rule-based): bổ sung pattern và thứ tự ưu tiên chiến thuật"
-git push -u origin feature/rule-based-patterns
-```
-
-</details>
-
-### Tiêu đề và mô tả PR Giai đoạn 2
-- **Tiêu đề PR:** `feat(rule-based): hoàn thiện nhận diện pattern và ưu tiên Rule-based`
-- **Mô tả nội dung mẫu:**
-  > Bổ sung cơ chế nhận diện pattern nâng cao, điểm đánh giá vị trí và quy tắc giải quyết xung đột luật. Notebook giải thích chi tiết các quyết định nước đi thông qua các thế cờ chiến thuật cụ thể. Bộ test bao phủ các vị trí biên bàn cờ, góc nhìn hai phía và các dạng đe dọa đa dạng.
 
 ---
 
@@ -334,18 +280,11 @@ git push -u origin feature/rule-based-evaluation
 
 ## 10. Quy trình tạo PR và xử lý phản hồi Review
 
-### Thiết lập thông tin bắt buộc trên GitHub
+### Thiết lập thông tin bắt buộc trên GitHub cho Task 3
 - **Reviewer:** @10tothepowerof6 (Nhóm trưởng). Chọn trực tiếp trong mục Reviewers trên giao diện PR khi đã sẵn sàng review; chỉ nhắc tên trong mô tả sẽ không tạo thông báo chính thức.
-- **Assignee:** Chưa gán (sẽ cập nhật tài khoản người phụ trách sau khi được cấp quyền truy cập repository). Người phụ trách có trách nhiệm theo dõi và hoàn thiện PR; reviewer chịu trách nhiệm kiểm tra và đánh giá thay đổi.
-- **Milestone:**
-  - Task 1–2 / PR tương ứng: [Báo cáo tiến độ nửa dự án](https://github.com/10tothepowerof6/AdvancedAI-Repo/milestone/2), hạn 09/11/2026.
-  - Task 3: [milestone tổng](https://github.com/10tothepowerof6/AdvancedAI-Repo/milestone/1).
-- **Liên kết Issue:**
-  - Giai đoạn 1: [Task 1 (Rule-based)](https://github.com/10tothepowerof6/AdvancedAI-Repo/issues/7)
-  - Giai đoạn 2: [Task 2 (Rule-based)](https://github.com/10tothepowerof6/AdvancedAI-Repo/issues/8)
-  - Giai đoạn 3: [Task 3 (Rule-based)](https://github.com/10tothepowerof6/AdvancedAI-Repo/issues/9)
-  *(Không tạo issue cho Giai đoạn 0).*
-- **Đóng issue:** Trong phần mô tả của PR hoàn thành task, sử dụng cú pháp `Closes #<số_issue>` (ví dụ: `Closes #7`). PR nháp hoặc PR chỉ hoàn thành một phần thì chỉ gắn liên kết tham chiếu thông thường, không dùng từ khóa `Closes`.
+- **Assignee.** Gán người phụ trách Task 3 theo issue #9 hoặc theo xác nhận của nhóm trưởng.
+- **Milestone.** Gắn [milestone tổng](https://github.com/10tothepowerof6/AdvancedAI-Repo/milestone/1).
+- **Liên kết issue.** Tham chiếu [Task 3 Rule-based](https://github.com/10tothepowerof6/AdvancedAI-Repo/issues/9) khi mở PR nháp. Dùng `Closes #9` khi đã hoàn thành tiêu chí nghiệm thu.
 - **Quy tắc bảo vệ nhánh:** Nhánh `main` bắt buộc phải có ít nhất một phê duyệt (approval) từ thành viên khác trước khi merge (áp dụng cho mọi tài khoản).
 
 ### Các bước tạo PR và xử lý góp ý
@@ -376,4 +315,4 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 - [ ] Không đưa vào Git các file không liên quan, thư mục môi trường ảo (`.venv`) hoặc dữ liệu có dung lượng lớn.
 - [ ] Nhóm trưởng xác nhận kiểm thử tích hợp thành công trước khi chính thức nghiệm thu phần việc.
 
-*Trạng thái tài liệu: Kế hoạch triển khai kỹ thuật; chưa xác nhận tác tử, thực nghiệm hay PR đã hoàn thành.*
+*Trạng thái tài liệu. Task 1 và Task 2 đã chuyển người phụ trách. Task 3 chờ phiên bản đã tích hợp để bắt đầu đánh giá.*
