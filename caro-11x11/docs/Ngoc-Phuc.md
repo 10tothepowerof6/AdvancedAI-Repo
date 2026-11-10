@@ -489,3 +489,100 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 - Toàn bộ test của dự án: 501 pass (trước khi sửa: 491).
 - Đã cố ý cài lại từng lỗi (bỏ kiểm tra hạn khi chấm nước, chỉ kiểm tra sau khi đã chấm hết, ván kết thúc vẫn trả ô trống): cả 3 đều bị test bắt.
 - Notebook chạy lại với code mới cho giá trị, nước đi, số nút và số lần cắt giống hệt bản đã commit; chỉ các số đo thời gian lệch vài mili giây như mọi lần chạy, nên không commit lại notebook.
+
+---
+
+## 14. Phân công bổ sung — Task 2 Rule-based
+
+**Phụ trách.** Ngọc Phúc (`@PhucLee23`) · [Issue #8 — Hoàn thiện pattern và thứ tự ưu tiên](https://github.com/10tothepowerof6/AdvancedAI-Repo/issues/8).
+
+Đây là đầu việc bổ sung, thực hiện trên nhánh riêng với Minimax. Mục tiêu là mở rộng `RuleBasedAgent` với nhận diện mẫu hình, xử lý xung đột luật và truy vết đủ rõ để Task 3 so sánh bản đầy đủ với baseline trên cùng điều kiện.
+
+### 14.1. Điều kiện bắt đầu và phạm vi chỉnh sửa
+
+Chỉ tạo nhánh `feature/rule-based-task-2` sau khi [Task 1 Rule-based của Phi Hùng](https://github.com/10tothepowerof6/AdvancedAI-Repo/issues/7) đã merge. Cập nhật `main`, chạy test Rule-based trên baseline và đọc API khởi tạo, cách phá hòa, thống kê cùng notebook phần 1–4 đã bàn giao. Trong thời gian chờ có thể chuẩn bị bảng ưu tiên, kỳ vọng cho từng thế cờ và ca kiểm thử trên giấy.
+
+| File | Phần phụ trách |
+| :--- | :--- |
+| `agents/rule_based_agent.py` | Mở rộng baseline với pattern, xung đột luật, phòng thủ nhiều hướng, dừng theo ngân sách và truy vết. |
+| `tests/test_rule_based_agent.py` | Giữ test baseline, bổ sung test pattern, chiến thuật, deadline và tích hợp hai cấu hình. |
+| `notebooks/01_rule_based.ipynb` | Giữ phần 1–4 của baseline, thêm phần 5–6. Các phần 7–10 dành cho Task 3. |
+| `docs/Ngoc-Phuc.md` | Ghi quyết định thiết kế, cấu hình, kết quả kiểm thử và giới hạn thực tế tại mục này. |
+
+`core/`, `config/`, `BaseAgent`, `RandomAgent`, `agents/__init__.py`, `evaluation/`, test chung và `requirements.txt` do nhóm trưởng quản lý. Chú thích, đầu ra, notebook và phần diễn giải trong commit hoặc PR dùng tiếng Việt.
+
+### 14.2. Hợp đồng tích hợp và nhận diện mẫu hình
+
+- **Luật cờ và đầu vào.** Bàn 11×11, X = `1`, O = `-1`, ô trống = `0`. Từ 5 quân liên tiếp theo bốn hướng là thắng, kể cả khi bị chặn hai đầu. Agent kế thừa `BaseAgent`, nhận `SearchBudget` và được gọi qua `choose_action(board, player)` trên ván đang diễn ra. Giữ đầu ra là `(row, col)` gồm hai số nguyên Python, chỉ số từ 0. Đánh thử trên bản sao, giữ bàn cờ gốc nguyên vẹn.
+- **Hai cấu hình đối chứng.** `use_patterns=False` giữ hành vi ba tầng của Task 1. `use_patterns=True` bật các tầng mẫu hình. Khai báo cờ tường minh khi so sánh hai biến thể. Dùng cùng hàm điểm vị trí, cách phá hòa, seed và bán kính cho hai cấu hình.
+- **Nhận diện theo nước tiếp theo.** Tách hàm kiểm tra từng mẫu khỏi việc chọn nước. Một nước đã thắng ngay được xử lý ở tầng `win_now`. Đếm các ô thắng mới do nước thử tạo ra theo tọa độ riêng biệt, kể cả khi nhiều đường cùng dẫn tới một ô. Phân biệt quân mình, quân đối thủ, ô trống và biên bàn.
+
+| Mẫu hình | Điều kiện và ca đối chứng |
+| :--- | :--- |
+| Bốn mở hoặc đe dọa kép | Có ít nhất hai ô thắng độc lập ở lượt sau. Kiểm tra chuỗi bốn hở hai đầu và giao điểm tạo đe dọa ở hai hướng. Ghi riêng hình dạng chuỗi và số ô thắng khi giải thích. |
+| Bốn nửa mở hoặc có khe | Có đúng một ô thắng mới, ở đầu còn mở hoặc ở khe giữa. Mép bàn và quân đối thủ chặn một đầu phải được xử lý đúng. Một quân đối thủ ngắt giữa chuỗi có thể khiến mẫu không còn ô thắng. |
+| Ba mở | Nước thử chưa tạo ô thắng ngay nhưng mở đường cho ít nhất một nước tiếp theo tạo bốn mở hoặc đe dọa kép. Kiểm tra cả ba liền và ba có khe. Dùng mẫu sát biên hoặc bị chặn không thể phát triển để đối chứng. |
+
+### 14.3. Thứ tự luật, phòng thủ và ngân sách
+
+| Thứ tự | Luật | Phạm vi và cách quyết định |
+| :--- | :--- | :--- |
+| 1 | `win_now` | Xét toàn bộ ô trống và thắng ngay nếu có thể. |
+| 2 | `block_urgent` | Xét toàn bộ ô trống để chặn đối thủ thắng ở lượt kế. |
+| 3 | `attack_open_four` | Tạo bốn mở hoặc đe dọa kép của bên đang đi. |
+| 4 | `block_open_four` | Ưu tiên nước làm giảm tối đa số nước tạo bốn mở hoặc đe dọa kép còn lại của đối thủ. |
+| 5 | `attack_broken_four` | Tạo một đe dọa thắng buộc đối thủ phải đáp trả. |
+| 6 | `attack_open_three` | Tạo ba mở để chuẩn bị đe dọa ở lượt sau. |
+| 7 | `block_open_three` | Ngăn đối thủ tạo ba mở. |
+| 8 | `positional_fallback` | Chọn nước dự phòng theo điểm vị trí của baseline. |
+
+- **Phạm vi ứng viên.** Tầng 3–8 dùng `candidate_actions` với bán kính mặc định 2. Khi `use_patterns=False`, bỏ tầng 3–7. Công bố mọi thay đổi phạm vi, trọng số và quy tắc phá hòa. Ghi rõ giới hạn nếu tập rút gọn bỏ sót nước xa cụm quân.
+- **Phòng thủ nhiều hướng.** Khi có nhiều phương án ở `block_open_four`, thử từng nước trên bản sao, tính lại cơ hội tạo đe dọa kép của đối thủ trong cùng phạm vi rồi mới dùng điểm vị trí để phá hòa. Phân biệt phòng thủ trước khi đe dọa kép hình thành với trường hợp đối thủ đã có hai ô thắng độc lập và một lượt chỉ chặn được một ô.
+- **Ngân sách.** `fixed` hoàn tất các bước của tầng luật đang xét. Ở `time`, giữ sẵn một nước dự phòng hợp lệ và kiểm tra mốc dừng giữa các ứng viên, gồm quét pattern lồng nhau và thử lại phương án phòng thủ. Có thể bắt đầu với mốc 1,9 giây trên hạn cứng 2,0 giây, sau đó kiểm chứng trên máy chạy và điều chỉnh biên cho ngân sách ngắn. `time_exhausted()` kiểm tra hạn cứng. Khi dừng sớm, trả nước hợp lệ đã có và ghi đúng lý do. Runner cưỡng chế quá giờ, ghi `timeout` và xử thua.
+- **Truy vết và thống kê.** `explain_last_action()` ghi luật kích hoạt, tọa độ chọn, số ứng viên thực sự đã xét, danh sách nước khớp và lý do. Dữ liệu trả về phải độc lập với agent. Công bố đơn vị đếm `nodes_visited`, gồm cách đếm lượt đánh thử phòng thủ, và chỉ đếm công việc thực hiện khi bị dừng sớm. `simulations` và `pruned_nodes` để 0. Khi chạy qua `play_match`, dùng `elapsed_s` từ runner để mô tả độ trễ thi đấu.
+
+### 14.4. Khung notebook phần 5–6
+
+| Phần | Nội dung cần có |
+| :--- | :--- |
+| 5. Pattern và độ ưu tiên | Ghi bảng luật, mẫu dương/âm, cách tính điểm, phạm vi ứng viên và cách phá hòa. Dựng các thế qua `CaroGame.step()`, ghi kỳ vọng trước khi chạy rồi gọi các hàm nhận diện từ module để đối chiếu. |
+| 6. Giải thích nước đi | Dùng agent từ module để chạy các ca xung đột, đổi X/O, phòng thủ nhiều hướng và đe dọa kép đã hình thành. Hiển thị lý do và nước khớp lấy trực tiếp từ truy vết, rồi ghi rõ giới hạn. |
+
+Giữ cùng cấu hình và fixture khi đối chiếu. Chạy notebook từ kernel mới, ghi kết quả thật. Phân tích ablation, thi đấu nhiều ván và bảng W/D/L thuộc Task 3.
+
+### 14.5. Cách viết test và tiêu chí đạt
+
+- [ ] Mỗi pattern có ca dương và ca âm. Bao phủ bốn hướng, hai phía, đầu bị chặn, biên, chuỗi có khe và quân đối thủ ngắt giữa. Tính tay tập nước thắng hoặc kiểm tra bằng `CaroGame.step()` trên ván hợp lệ để lấy kỳ vọng độc lập.
+- [ ] Kiểm tra từng tầng và các cặp luật xung đột. Thắng ngay luôn đứng đầu, chặn thắng ngay đứng trên pattern. Đổi X/O, kiểm tra phá hòa theo quy tắc đã công bố và xác nhận cấu hình tắt pattern giữ hành vi baseline.
+- [ ] Kiểm tra thế có một nước chặn được nhiều hướng và thế đã có hai ô thắng độc lập. Với nhiều nước tương đương, dùng tập nước đúng hoặc tiêu chí phá hòa đã công bố.
+- [ ] Dùng đồng hồ giả cho ca hết giờ trước khi quét pattern, trong lúc quét và khi đang thử phương án phòng thủ. Kiểm tra vòng quét dừng, nước trả về hợp lệ, truy vết và số ứng viên khớp công việc thực tế.
+- [ ] Kiểm tra API, bàn cờ đầu vào nguyên vẹn, bản truy vết độc lập. Chạy test riêng, toàn bộ suite và notebook từ kernel mới. Ghi số test đạt/thất bại, fixture, cấu hình, kết quả thực chạy và các giới hạn đã biết trong PR.
+
+**Thế hồi quy phòng thủ nhiều hướng.** Dựng bằng `CaroGame.step()`, xen kẽ X và O theo bảng, X đi trước. Sau 12 nước, X đi `(0, 0)` thì O hết nước tạo đe dọa kép. Nếu X đi `(0, 4)`, O còn nước `(4, 0)` tạo hai ô thắng `(0, 0)` và `(5, 0)`.
+
+| Bên | Tọa độ theo thứ tự |
+| :--- | :--- |
+| X | `(1, 4)`, `(2, 5)`, `(9, 10)`, `(8, 8)`, `(10, 8)`, `(7, 10)` |
+| O | `(0, 1)`, `(1, 0)`, `(0, 2)`, `(2, 0)`, `(0, 3)`, `(3, 0)` |
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_rule_based_agent.py -v
+.\.venv\Scripts\python.exe -m pytest tests -v
+```
+
+### 14.6. Nhánh, cột mốc commit và PR
+
+Sau khi Task 1 đã merge, từ thư mục `caro-11x11` kiểm tra `git status`, lưu công việc đang làm trên nhánh hiện tại rồi chuyển sang `main`, chạy `git pull --ff-only origin main` và chạy `git switch -c feature/rule-based-task-2`.
+
+| Cột mốc | File được stage | Commit đề xuất |
+| :--- | :--- | :--- |
+| Nhận diện mẫu và bảng luật chạy được | `agents/rule_based_agent.py`, `tests/test_rule_based_agent.py` | `feat(rule-based): bổ sung mẫu hình và thứ tự ưu tiên` |
+| Phòng thủ nhiều hướng, dừng theo ngân sách và truy vết | `agents/rule_based_agent.py`, `tests/test_rule_based_agent.py` | `feat(rule-based): xử lý phòng thủ nhiều hướng và kiểm soát thời gian` |
+| Notebook phần 5–6 và ghi chú bàn giao | `notebooks/01_rule_based.ipynb`, `docs/Ngoc-Phuc.md` | `docs(rule-based): giải thích quyết định và bàn giao cấu hình pattern` |
+
+Stage đúng thay đổi của từng cột mốc, kiểm tra `git diff --cached`, commit rồi push. Lần đầu dùng `git push -u origin feature/rule-based-task-2`, các lần sau dùng `git push` trên cùng nhánh. Nếu cần review sớm, mở PR nháp và chỉ tham chiếu `#8`.
+
+- **Tiêu đề PR.** `feat(rule-based): hoàn thiện nhận diện mẫu hình và ưu tiên chiến thuật`.
+- **Mô tả PR.** Mở rộng baseline với các tầng mẫu hình, giải quyết xung đột, phòng thủ nhiều hướng và giới hạn thời gian. Giải thích quyết định bằng notebook phần 5–6. Kèm danh sách file, lệnh chạy, số test thực tế, fixture, hành vi hai cấu hình và giới hạn kỹ thuật.
+- **Thông tin GitHub.** Base `main`, compare `feature/rule-based-task-2`, assignee `@PhucLee23`, reviewer `@10tothepowerof6`, [milestone Báo cáo tiến độ nửa dự án](https://github.com/10tothepowerof6/AdvancedAI-Repo/milestone/2). Thêm `Closes #8` khi đủ tiêu chí nghiệm thu. Kiểm tra diff chỉ chứa phần mở rộng Task 2 trước khi yêu cầu review.
+- **Bàn giao sau merge.** Ghi rõ cách khởi tạo hai cấu hình, điểm vị trí, quy tắc phá hòa, thống kê, mốc dừng và thế cờ kiểm chứng. Đây là thông tin đầu vào để Task 3 chạy đối chứng và thi đấu thử.
