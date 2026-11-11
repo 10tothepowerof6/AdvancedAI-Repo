@@ -1,4 +1,6 @@
-"""Kiểm thử Rule-based — Giai đoạn 1: luật thắng ngay, chặn thua và nước dự phòng.
+"""Kiểm thử Rule-based - Giai đoạn 1 (thắng ngay, chặn thua, dự phòng) và Giai đoạn 2 (mẫu hình, thứ tự luật).
+
+Các test Giai đoạn 1 dùng cấu hình mặc định ``use_patterns=False``; phần Giai đoạn 2 ở cuối file.
 
 Thế cờ được dựng bằng CaroGame.step() qua chuỗi nước hợp lệ (engine không có API nạp bàn cờ).
 Nước thắng/chặn kỳ vọng được tính tay theo hình học của chuỗi; trong ván đầy đủ, kết quả
@@ -8,16 +10,20 @@ Các test dài chia ba phần: Chuẩn bị / Thực thi / Kiểm chứng. Test 
 """
 
 import dataclasses
+import re
 from functools import partial
 
 import numpy as np
 import pytest
 
 from agents.random_agent import RandomAgent
-from agents.rule_based_agent import (PATTERN_BROKEN_FOUR, PATTERN_FIVE, PATTERN_NONE, PATTERN_OPEN_FOUR,
-                                     PATTERN_OPEN_THREE, RULE_BLOCK, RULE_FALLBACK, RULE_WIN, Decision,
-                                     RuleBasedAgent, classify_move, has_winner, is_winning_move, line_length,
-                                     new_winning_cells, open_three_followups, position_score, winning_moves)
+from agents.rule_based_agent import (BASELINE_RULES, PATTERN_BROKEN_FOUR, PATTERN_FIVE, PATTERN_NONE,
+                                     PATTERN_OPEN_FOUR, PATTERN_OPEN_THREE, RULE_ATTACK_BROKEN_FOUR,
+                                     RULE_ATTACK_OPEN_FOUR, RULE_ATTACK_OPEN_THREE, RULE_BLOCK,
+                                     RULE_BLOCK_OPEN_FOUR, RULE_BLOCK_OPEN_THREE, RULE_FALLBACK, RULE_WIN,
+                                     RULES, Decision, RuleBasedAgent, classify_move, has_winner,
+                                     is_winning_move, line_length, new_winning_cells, open_three_followups,
+                                     position_score, rank_key, winning_moves)
 from config.search_budget import SearchBudget
 from core.game_engine import CaroGame
 from core.game_utils import candidate_actions
@@ -548,7 +554,11 @@ def test_rejects_invalid_time_margin(margin):
         RuleBasedAgent(time_margin_s=margin)
 
 
-# ================================================================ Giai đoạn 2: mẫu hình và thứ tự luật
+# ---Giai đoạn 2: mẫu hình và thứ tự luật
+
+def _pattern_agent(**kwargs):
+    return RuleBasedAgent(use_patterns=True, **kwargs)
+
 
 def _oracle_new_wins(board, action, player):
     """Kiểm tra độc lập: ô trước nước thử chưa thắng, sau nước thử (đặt trên bản sao) thì thắng."""
@@ -673,3 +683,354 @@ def test_new_winning_cells_matches_oracle_on_random_positions(seed):
         for player in (X, O):
             assert set(new_winning_cells(board, action, player)) == _oracle_new_wins(board, action, player)
 
+
+# ---- thứ tự luật và xung đột
+
+def _decide(owner, mine, theirs):
+    game = place(owner, mine, theirs, to_move=owner)
+    return game, _pattern_agent().decide(game.board, owner)
+
+
+@SIDES
+def test_win_beats_everything_with_patterns(owner):
+    _, decision = _decide(owner, [(5, 3), (5, 4), (5, 5), (5, 6)], [(0, 0), (0, 1), (0, 2), (2, 9)])
+    assert decision.rule == RULE_WIN and set(decision.acceptable) == {(5, 2), (5, 7)}
+
+
+@SIDES
+def test_block_urgent_beats_attack_open_four(owner):
+    # Mình có ba mở (tạo được bốn mở) nhưng đối thủ có bốn quân, ô thắng (0,4): phải chặn.
+    _, decision = _decide(owner, [(5, 3), (5, 4), (5, 5)], [(0, 0), (0, 1), (0, 2), (0, 3)])
+    assert decision.rule == RULE_BLOCK and decision.action == (0, 4)
+
+
+@SIDES
+def test_attack_open_four_beats_block_open_four(owner):
+    # Mình: ba mở ở hàng 5; đối thủ: ba quân dọc ở cột 8, có nước (4,8) tạo bốn mở.
+    # Nước bốn mở của mình (tính tay): (5,2) và (5,6); cùng 2 ô thắng, (5,6) gần tâm hơn.
+    _, decision = _decide(owner, [(5, 3), (5, 4), (5, 5)], [(1, 8), (2, 8), (3, 8)])
+    assert decision.rule == RULE_ATTACK_OPEN_FOUR
+    assert set(decision.acceptable) == {(5, 2), (5, 6)} and decision.action == (5, 6)
+
+
+@SIDES
+def test_block_open_four_beats_attack_broken_four(owner):
+    # Mình: ba quân bị chặn trái ở (5,2) nên chỉ tạo được bốn một ô thắng; đối thủ có nước bốn mở (4,8).
+    # Nước làm đối thủ hết bốn mở (tính tay): (0,8), (4,8), (5,8); (4,8) có điểm vị trí 1 và gần tâm nhất.
+    _, decision = _decide(owner, [(5, 3), (5, 4), (5, 5)], [(5, 2), (1, 8), (2, 8), (3, 8)])
+    assert decision.rule == RULE_BLOCK_OPEN_FOUR
+    assert set(decision.acceptable) == {(0, 8), (4, 8), (5, 8)} and decision.action == (4, 8)
+
+
+@SIDES
+def test_attack_broken_four_beats_open_three_rules(owner):
+    _, decision = _decide(owner, [(5, 3), (5, 4), (5, 5)], [(5, 2)])
+    assert decision.rule == RULE_ATTACK_BROKEN_FOUR
+    assert set(decision.acceptable) == {(5, 6), (5, 7)} and decision.action == (5, 6)
+
+
+@SIDES
+def test_attack_open_three_beats_block_open_three(owner):
+    # Mình: hai quân (5,4),(5,5). Nước ba mở (tính tay): (5,2),(5,3),(5,6),(5,7); (5,3) và (5,6) có
+    # hai nước tiếp theo, (5,2) và (5,7) chỉ có một; giữa (5,3) và (5,6) thì (5,6) gần tâm hơn.
+    _, decision = _decide(owner, [(5, 4), (5, 5)], [(2, 8), (3, 8)])
+    assert decision.rule == RULE_ATTACK_OPEN_THREE
+    assert set(decision.acceptable) == {(5, 2), (5, 3), (5, 6), (5, 7)} and decision.action == (5, 6)
+
+
+@SIDES
+def test_block_open_three_takes_cell_leaving_fewest(owner):
+    # Đối thủ: hai quân (5,4),(5,5), nước ba mở (5,2),(5,3),(5,6),(5,7). Chiếm (5,3) hoặc (5,6) thì đối thủ
+    # hết nước ba mở trên hàng này; chiếm (5,2) hoặc (5,7) thì vẫn còn.
+    _, decision = _decide(owner, [], [(5, 4), (5, 5)])
+    assert decision.rule == RULE_BLOCK_OPEN_THREE
+    assert set(decision.acceptable) == {(5, 3), (5, 6)} and decision.action == (5, 6)
+
+
+def test_tie_break_strength_comes_before_position_score():
+    # Quy tắc phá hòa đã công bố: độ mạnh của mẫu (số ô thắng mới hoặc số nước tiếp theo) xét trước rank_key.
+    game = build([(5, 5)], [(6, 6)], to_move=X)
+    board = game.board
+    near, far = (4, 5), (0, 0)
+    assert rank_key(board, near, X) < rank_key(board, far, X)
+    strength = {near: 1, far: 2}.get
+    decision = RuleBasedAgent._pick(board, X, RULE_ATTACK_OPEN_THREE, [near, far], "thử", False, 0, strength)
+    assert decision.action == far
+    assert RuleBasedAgent._pick(board, X, RULE_FALLBACK, [near, far], "thử", False).action == near
+
+
+def test_quiet_position_falls_back_like_baseline():
+    game = build([(5, 5)], [(6, 6)], to_move=X)
+    full, base = _pattern_agent().decide(game.board, X), RuleBasedAgent().decide(game.board, X)
+    assert full.rule == base.rule == RULE_FALLBACK and full.action == base.action
+
+
+@pytest.mark.parametrize("mine,theirs", [
+    ([(5, 3), (5, 4), (5, 5)], [(1, 8), (2, 8), (3, 8)]),
+    ([(5, 3), (5, 4), (5, 5)], [(5, 2), (1, 8), (2, 8), (3, 8)]),
+    ([(5, 4), (5, 5)], [(2, 8), (3, 8)]),
+    ([], [(5, 4), (5, 5)]),
+], ids=["bon_mo", "chan_bon_mo", "ba_mo", "chan_ba_mo"])
+def test_use_patterns_false_keeps_baseline_rules(mine, theirs):
+    # Cùng thế cờ: tắt pattern chỉ còn ba tầng của Giai đoạn 1.
+    game = place(X, mine, theirs, to_move=X)
+    base = RuleBasedAgent(use_patterns=False)
+    assert base.decide(game.board, X).rule in BASELINE_RULES and base.rules == BASELINE_RULES
+    assert _pattern_agent().rules == RULES
+
+
+def test_opponent_double_threat_is_reported_not_solved():
+    # Đối thủ đã có bốn mở (hai ô thắng độc lập): một lượt chỉ chặn được một ô, cả hai cấu hình như nhau.
+    game = build([(0, 0), (0, 10), (10, 0), (10, 10)], [(5, 3), (5, 4), (5, 5), (5, 6)], to_move=X)
+    for agent in (RuleBasedAgent(), _pattern_agent()):
+        decision = agent.decide(game.board, X)
+        assert decision.rule == RULE_BLOCK and set(decision.acceptable) == {(5, 2), (5, 7)}
+        assert "đe dọa kép" in decision.reason
+
+
+def _regression_game():
+    # Thế hồi quy ở docs/Ngoc-Phuc.md mục 14.5: xen kẽ X, O, X đi trước; sau 12 nước X đến lượt.
+    xs = [(1, 4), (2, 5), (9, 10), (8, 8), (10, 8), (7, 10)]
+    os_ = [(0, 1), (1, 0), (0, 2), (2, 0), (0, 3), (3, 0)]
+    game = CaroGame()
+    for x, o in zip(xs, os_):
+        game.step(x)
+        game.step(o)
+    return game
+
+
+def test_multi_direction_defense_regression():
+    # Chuẩn bị
+    board = _regression_game().board
+    # Thực thi
+    decision = _pattern_agent().decide(board, X)
+    # Kiểm chứng: chặn (0,0) làm O hết nước tạo đe dọa kép; chặn (0,4) thì O còn (4,0) tạo (0,0) và (5,0).
+    assert decision.rule == RULE_BLOCK_OPEN_FOUR and decision.action == (0, 0)
+    assert decision.acceptable == ((0, 0),)
+    after = board.copy()
+    after[0, 4] = X
+    assert new_winning_cells(after, (4, 0), O) == ((0, 0), (5, 0))
+    after = board.copy()
+    after[0, 0] = X
+    assert all(len(new_winning_cells(after, m, O)) < 2 for m in candidate_actions(after, 2))
+
+
+@pytest.mark.parametrize("make", [
+    _regression_game,
+    lambda: place(X, [(5, 3), (5, 4), (5, 5)], [(5, 2), (1, 8), (2, 8), (3, 8)], to_move=X),
+], ids=["hoi_quy", "chan_bon_mo"])
+def test_block_open_four_matches_full_recount(make):
+    # Tác tử chỉ kiểm tra lại các nước bốn mở đã tìm thấy; đối chiếu với đếm lại trên toàn bộ ứng viên.
+    board = make().board
+    decision = _pattern_agent().decide(board, X)
+    remaining = {}
+    for action in candidate_actions(board, 2):
+        after = board.copy()
+        after[action] = X
+        remaining[action] = sum(len(new_winning_cells(after, m, O)) >= 2 for m in candidate_actions(board, 2)
+                                if m != action)
+    fewest = min(remaining.values())
+    assert set(decision.acceptable) == {a for a, n in remaining.items() if n == fewest}
+
+
+# ----- API, truy vết, ván hoàn chỉnh
+
+@pytest.mark.parametrize("value", ["yes", 1, None], ids=["chuoi", "so_nguyen", "none"])
+def test_rejects_invalid_use_patterns(value):
+    with pytest.raises(ValueError):
+        RuleBasedAgent(use_patterns=value)
+
+
+def test_pattern_agent_keeps_board_and_returns_python_ints():
+    game = _regression_game()
+    before = game.board.copy()
+    action = _pattern_agent().choose_action(game.board, X)
+    assert np.array_equal(game.board, before)
+    assert type(action) is tuple and all(type(v) is int for v in action)
+
+
+def test_pattern_trace_is_independent_and_counts_nodes():
+    agent = _pattern_agent()
+    agent.choose_action(_regression_game().board, X)
+    decision = agent.explain_last_action()
+    assert decision.examined == agent.stats["nodes_visited"] > 0
+    assert agent.stats["simulations"] == 0 and agent.stats["pruned_nodes"] == 0
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        decision.rule = RULE_FALLBACK
+    # Lượt sau không làm đổi bản truy vết đã lấy ra.
+    agent.choose_action(CaroGame().board, X)
+    assert decision.action == (0, 0) and agent.explain_last_action().action == (5, 5)
+
+
+def test_pattern_agent_is_deterministic():
+    game = place(X, [(5, 4), (5, 5)], [(2, 8), (3, 8)], to_move=X)
+    decisions = {_pattern_agent().decide(game.board, X) for _ in range(3)}
+    assert len(decisions) == 1
+
+
+@pytest.mark.parametrize("seed", range(3))
+@SIDES
+def test_pattern_agent_full_game_against_random(seed, owner):
+    # Bật pattern vẫn phải giữ thắng ngay và chặn thua (đối chiếu hàm kiểm tra độc lập).
+    game = CaroGame()
+    rule, rand = _pattern_agent(), RandomAgent(seed=seed)
+    while not game.is_terminal():
+        player = game.current_player
+        if player == owner:
+            own, threats = _oracle_wins(game.board, player), _oracle_wins(game.board, -player)
+            action = rule.choose_action(game.board, player)
+            if own:
+                assert action in own
+            elif threats:
+                assert action in threats
+            assert rule.explain_last_action().rule in RULES
+        else:
+            action = rand.choose_action(game.board, player)
+        game.step(action)
+    assert game.result() in (-1, 0, 1)
+
+
+def test_pattern_vs_baseline_game_completes():
+    game = CaroGame()
+    agents = {X: _pattern_agent(name="Rule X"), O: RuleBasedAgent("Rule O", use_patterns=False)}
+    while not game.is_terminal():
+        game.step(agents[game.current_player].choose_action(game.board, game.current_player))
+    assert game.result() in (-1, 0, 1)
+
+
+def test_play_match_runner_with_patterns():
+    record, logs = play_match(partial(RuleBasedAgent, use_patterns=True), partial(RandomAgent, seed=5),
+                              agent_x="Rule-based pattern", agent_o="Ngẫu nhiên",
+                              budget=SearchBudget(mode="time", time_limit_s=2.0))
+    assert record.reason == "completed"
+    rule_logs = [log for log in logs if log["player"] == X]
+    assert rule_logs and all(log["status"] == "move" and log["stats"]["nodes_visited"] > 0 for log in rule_logs)
+
+
+# ---- ngân sách thời gian khi bật pattern
+
+def _pattern_time_agent(limit):
+    return _pattern_agent(budget=SearchBudget(mode="time", time_limit_s=limit))
+
+
+class _RecordingClock(_FakeClock):
+    """Đồng hồ giả ghi lại riêng các lần tác tử Rule-based đọc giờ (BaseAgent đọc qua __call__)."""
+
+    def __init__(self, start=100.0, step=0.001):
+        super().__init__(start, step)
+        self.agent_reads = []
+
+    def agent_read(self):
+        value = self()
+        self.agent_reads.append(value)
+        return value
+
+
+def _use_recording_clock(monkeypatch, clock):
+    monkeypatch.setattr("agents.base_agent.perf_counter", clock)
+    monkeypatch.setattr("agents.rule_based_agent.perf_counter", clock.agent_read)
+
+
+def _reads_past_stop(clock, agent):
+    # Số lần tác tử đọc giờ từ mốc dừng hợp tác trở đi; dừng đúng lúc thì chỉ có 1 (lần phát hiện hết giờ).
+    stop_at = agent.deadline - min(agent.time_margin_s, 0.5 * agent.budget.time_limit_s)
+    return sum(value >= stop_at for value in clock.agent_reads)
+
+
+def test_time_mode_stops_during_pattern_scan(monkeypatch):
+    # Chuẩn bị: thế yên tĩnh; mốc dừng sau 2 lượt quét toàn bàn + khoảng 10 lần đọc: giữa lúc tìm bốn mở.
+    clock = _RecordingClock()
+    _use_recording_clock(monkeypatch, clock)
+    game = build([(5, 5)], [(6, 6)], to_move=X)
+    n_empty = int(np.count_nonzero(game.board == 0))
+    candidates = candidate_actions(game.board, 2)
+    agent = _pattern_time_agent(0.1 + (2 * n_empty + 10) * 0.001)
+    start = clock.now
+    # Thực thi
+    action = agent.choose_action(game.board, X)
+    # Kiểm chứng: dừng trước deadline, trả nước dự phòng chuẩn bị sẵn, số nước thử khớp lý do.
+    decision = agent.explain_last_action()
+    examined = agent.stats["nodes_visited"]
+    assert clock.now < start + agent.budget.time_limit_s
+    assert decision.timed_out and decision.rule == RULE_FALLBACK and action == (4, 5)
+    assert 0 < examined - 2 * n_empty < len(candidates)
+    assert "dừng khi đang tìm bốn mở của mình" in decision.reason
+    assert f"hết thời gian sau {examined} nước thử" in decision.reason
+    assert _reads_past_stop(clock, agent) == 1
+
+
+def test_time_mode_stops_while_trying_blocks(monkeypatch):
+    # Chuẩn bị: thế hồi quy; mốc dừng sau 2 lượt quét toàn bàn, 2 lượt quét ứng viên và khoảng 30 lần đọc
+    # nữa: giữa lúc thử các nước chặn.
+    clock = _RecordingClock()
+    _use_recording_clock(monkeypatch, clock)
+    game = _regression_game()
+    n_empty = int(np.count_nonzero(game.board == 0))
+    candidates = candidate_actions(game.board, 2)
+    agent = _pattern_time_agent(0.1 + (2 * n_empty + 2 * len(candidates) + 30) * 0.001)
+    # Thực thi
+    action = agent.choose_action(game.board, X)
+    # Kiểm chứng: vẫn là tầng chặn bốn mở, chỉ chọn trong các nước đã thử xong, ghi đúng số nước đã thử.
+    decision = agent.explain_last_action()
+    match = re.search(r"thử (\d+)/(\d+) nước chặn", decision.reason)
+    assert decision.rule == RULE_BLOCK_OPEN_FOUR and decision.timed_out and match
+    tried = int(match.group(1))
+    assert 0 < tried < len(candidates) == int(match.group(2))
+    assert action in candidates[:tried] and set(decision.acceptable) <= set(candidates[:tried])
+    assert _reads_past_stop(clock, agent) == 1
+
+
+def test_time_mode_stops_inside_nested_open_three_scan(monkeypatch):
+    # Chuẩn bị: mốc dừng khoảng 15 lần đọc sau khi bắt đầu tìm ba mở; ứng viên đầu tiên đã cần vài chục
+    # nước thử lồng nhau nên phải dừng ngay trong vòng lồng.
+    clock = _RecordingClock()
+    _use_recording_clock(monkeypatch, clock)
+    game = place(X, [(5, 4), (5, 5)], [(2, 8), (3, 8)], to_move=X)
+    n_empty = int(np.count_nonzero(game.board == 0))
+    candidates = candidate_actions(game.board, 2)
+    full = _pattern_agent()
+    full.decide(game.board, X)
+    agent = _pattern_time_agent(0.1 + (2 * n_empty + 2 * len(candidates) + 15) * 0.001)
+    # Thực thi
+    agent.choose_action(game.board, X)
+    # Kiểm chứng: dừng khi chưa tìm được ba mở nào (các nước ba mở ở hàng 5, nằm sau trong thứ tự quét).
+    decision = agent.explain_last_action()
+    in_scan = agent.stats["nodes_visited"] - 2 * n_empty - 2 * len(candidates)
+    assert decision.timed_out and decision.rule == RULE_FALLBACK
+    assert "dừng khi đang tìm ba mở của mình" in decision.reason
+    assert 0 < in_scan < 15 and agent.stats["nodes_visited"] < full.stats["nodes_visited"]
+    # Dừng ngay ở lần đọc giờ đầu tiên quá mốc, không chạy nốt vòng lồng của ứng viên đang xét.
+    assert _reads_past_stop(clock, agent) == 1
+
+
+@pytest.mark.parametrize("make", [
+    _regression_game,
+    lambda: place(X, [(5, 4), (5, 5)], [(2, 8), (3, 8)], to_move=X),
+    lambda: place(X, [], [(5, 4), (5, 5)], to_move=X),
+], ids=["chan_bon_mo", "ba_mo", "chan_ba_mo"])
+def test_every_trial_move_checks_the_clock_first(monkeypatch, make):
+    # Đủ giờ: mỗi nước thử được đếm vào nodes_visited đều có một lần kiểm tra mốc dừng ngay trước nó,
+    # kể cả các nước thử lồng nhau, nên số lần đọc giờ không nhỏ hơn số nút.
+    clock = _RecordingClock(step=1e-6)
+    _use_recording_clock(monkeypatch, clock)
+    agent = _pattern_time_agent(2.0)
+    agent.choose_action(make().board, X)
+    assert not agent.explain_last_action().timed_out
+    assert len(clock.agent_reads) >= agent.stats["nodes_visited"] > 0
+
+
+def test_pattern_time_mode_with_enough_time_matches_fixed(monkeypatch):
+    clock = _FakeClock(step=1e-6)
+    _use_clock(monkeypatch, clock)
+    board = _regression_game().board
+    timed, fixed = _pattern_time_agent(2.0), _pattern_agent()
+    assert timed.choose_action(board, X) == fixed.choose_action(board, X)
+    assert not timed.explain_last_action().timed_out
+    assert timed.stats["nodes_visited"] == fixed.stats["nodes_visited"]
+
+
+def test_pattern_fixed_mode_ignores_clock(monkeypatch):
+    monkeypatch.setattr("agents.rule_based_agent.perf_counter", lambda: float("inf"))
+    agent = _pattern_agent()
+    assert agent.choose_action(_regression_game().board, X) == (0, 0)
+    assert not agent.explain_last_action().timed_out
