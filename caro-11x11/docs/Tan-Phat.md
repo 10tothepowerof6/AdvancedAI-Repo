@@ -183,6 +183,14 @@ File `notebooks/01_rule_based.ipynb` được tổ chức tuần tự theo 10 ph
 
 **Bằng chứng bắt buộc trong PR:** Lệnh kiểm thử đã chạy, số lượng test đạt/thất bại, danh sách fixture đã thử nghiệm và các hạn chế kỹ thuật đã biết.
 
+### Kết quả bàn giao Giai đoạn 1 (Phi Hùng)
+- **Thứ tự luật:** `thang_ngay` → `chan_thua` → `du_phong`. Hai tầng đầu quét toàn bộ ô trống; tầng dự phòng chọn trong `candidate_actions` bán kính 2 theo điểm `2 × quân mình + 1 × quân đối thủ` ở 8 ô kề.
+- **Phá hòa tất định** (không dùng seed): điểm vị trí cao hơn → gần tâm hơn (Chebyshev, rồi Manhattan) → hàng nhỏ → cột nhỏ (`rank_key`).
+- **Hàm dùng lại được cho Giai đoạn 2:** `line_length`, `is_winning_move`, `winning_moves`, `has_winner`, `position_score`, `rank_key`; `RuleBasedAgent.decide()` trả `Decision(rule, action, acceptable, reason)` bất biến, `explain_last_action()` trả quyết định gần nhất.
+- **`stats["nodes_visited"]`:** số ô thực sự đã xét trong lượt (ô trống tầng 1 + ô trống tầng 2 nếu tới + ứng viên được chấm điểm ở tầng 3 nếu tới).
+- **Chế độ `time`:** chuẩn bị sẵn nước dự phòng hợp lệ, kiểm tra mốc dừng (deadline − `time_margin_s`, mặc định 0,1 giây) trước mỗi ô ở cả ba tầng; hết giờ trả quyết định tốt nhất đã có, `Decision.timed_out` = True và lý do ghi số ô đã xét.
+- **Giới hạn đã biết:** không nhận ra ba mở trước khi thành bốn mở, nên gặp bốn mở chỉ chặn được một đầu; tầng dự phòng không có pattern.
+
 ---
 
 ## 8. Giai đoạn 2 — Hoàn thiện Pattern và thứ tự ưu tiên
