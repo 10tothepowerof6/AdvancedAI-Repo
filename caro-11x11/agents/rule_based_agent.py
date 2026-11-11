@@ -11,12 +11,17 @@ bốn mở, chuỗi có khoảng trống...) thuộc Giai đoạn 2.
 
 Mọi hàm chỉ đọc ``board``: nước thử được kiểm tra bằng cách đếm quân hai phía của ô trống,
 không đặt quân tạm lên mảng.
+
+Chế độ ``time``: nước dự phòng hợp lệ được chuẩn bị trước khi quét, mốc dừng hợp tác được kiểm tra
+trước mỗi ô; hết giờ thì trả quyết định tốt nhất đã có (xem ``RuleBasedAgent``).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from numbers import Integral
+from math import isfinite
+from numbers import Integral, Real
+from time import perf_counter
 
 import numpy as np
 
@@ -29,6 +34,8 @@ from core.game_utils import candidate_actions
 # Ngang, dọc, chéo chính, chéo phụ — cùng thứ tự với CaroGame.DIRECTIONS.
 DIRECTIONS: tuple[tuple[int, int], ...] = ((0, 1), (1, 0), (1, 1), (1, -1))
 DEFAULT_RADIUS = 2
+# Biên an toàn chế độ time: dừng ở 1,9 giây trên hạn 2,0 giây (theo docs).
+DEFAULT_TIME_MARGIN_S = 0.1
 
 RULE_WIN = "thang_ngay"
 RULE_BLOCK = "chan_thua"
@@ -109,40 +116,76 @@ class Decision:
     """Truy vết một quyết định; bất biến để bên ngoài không sửa được dữ liệu nội bộ.
 
     ``acceptable`` là tập nước chấp nhận được của tầng đã kích hoạt (mọi nước thắng ngay,
-    hoặc mọi ô chặn, hoặc mọi ứng viên cùng điểm cao nhất ở tầng dự phòng).
+    hoặc mọi ô chặn, hoặc mọi ứng viên cùng điểm cao nhất ở tầng dự phòng). Khi ``timed_out``
+    là True, tập này chỉ gồm những ô đã kịp xét trước mốc dừng.
     """
 
     rule: str
     action: Action
     acceptable: tuple[Action, ...]
     reason: str
+    timed_out: bool = False
+
+
+def _center_key(action: Action, size: int) -> tuple[int, int, int, int]:
+    """Khóa gần tâm (Chebyshev, Manhattan, hàng, cột); chỉ dùng phép tính số học, không đọc bàn cờ."""
+    row, col = action
+    center = size // 2
+    dr, dc = abs(row - center), abs(col - center)
+    return (max(dr, dc), dr + dc, row, col)
 
 
 class RuleBasedAgent(BaseAgent):
     """Rule-based Giai đoạn 1: thắng ngay → chặn thua → dự phòng vị trí; hoàn toàn tất định.
 
-    ``stats["nodes_visited"]`` đếm số ô được đánh giá trong lượt: số ô trống ở tầng thắng,
-    cộng số ô trống ở tầng chặn (nếu tới), cộng số ứng viên ở tầng dự phòng (nếu tới).
-    ``simulations`` và ``pruned_nodes`` luôn 0. Tác tử trả về ngay, không dùng hết ngân sách thời gian.
+    ``stats["nodes_visited"]`` đếm số ô **thực sự đã xét** trong lượt: ô trống ở tầng thắng,
+    ô trống ở tầng chặn (nếu tới), ứng viên được chấm điểm ở tầng dự phòng (nếu tới).
+    ``simulations`` và ``pruned_nodes`` luôn 0.
+
+    Ngân sách:
+      ``fixed``: không có giới hạn thời gian, luôn xét hết các tầng cần thiết.
+      ``time``: mốc dừng hợp tác = deadline − min(time_margin_s, 0,5 × time_limit_s). Trước khi quét,
+      tác tử chuẩn bị sẵn nước dự phòng hợp lệ (ứng viên gần tâm nhất); mốc dừng được kiểm tra trước
+      mỗi ô ở cả ba tầng. Hết giờ thì trả quyết định tốt nhất đã có: nước thắng hoặc ô chặn đã tìm thấy,
+      nếu không thì ứng viên điểm cao nhất đã chấm, cuối cùng là nước dự phòng chuẩn bị sẵn.
     """
 
     def __init__(self, name: str = "Rule-based", *, budget: SearchBudget | None = None,
-                 radius: int = DEFAULT_RADIUS, win_length: int = WIN_LENGTH):
+                 radius: int = DEFAULT_RADIUS, win_length: int = WIN_LENGTH,
+                 time_margin_s: float = DEFAULT_TIME_MARGIN_S):
         super().__init__(name, budget=budget)
         self.radius = _check_positive_int(radius, "Bán kính ứng viên")
         self.win_length = _check_positive_int(win_length, "Độ dài thắng")
+        if (isinstance(time_margin_s, (bool, np.bool_)) or not isinstance(time_margin_s, Real)
+                or not isfinite(time_margin_s) or time_margin_s < 0):
+            raise ValueError("Biên an toàn thời gian phải là số hữu hạn không âm")
+        self.time_margin_s = float(time_margin_s)
         self.last_decision: Decision | None = None
 
     def explain_last_action(self) -> Decision | None:
         """Quyết định của lượt gần nhất (None nếu chưa đi nước nào)."""
         return self.last_decision
 
-    def decide(self, board: np.ndarray, player: int) -> Decision:
-        """Áp dụng ba tầng luật và trả về quyết định kèm lý do; không sửa ``board``.
+    def _stop_at(self, deadline: float | None) -> float | None:
+        """Mốc dừng hợp tác: None ở chế độ fixed; chế độ time bắt buộc có deadline."""
+        if self.budget.mode != "time":
+            return None
+        if deadline is None:
+            raise ValueError("Chế độ time cần deadline cho lượt hiện tại")
+        return deadline - min(self.time_margin_s, 0.5 * self.budget.time_limit_s)
 
-        Gọi trực tiếp được (ví dụ trong notebook); ``stats["nodes_visited"]`` được ghi đè
-        bằng số ô đã đánh giá của lần gọi này, không cộng dồn giữa các lần gọi.
+    def decide(self, board: np.ndarray, player: int) -> Decision:
+        """Gọi trực tiếp (ví dụ trong notebook): áp dụng ba tầng luật, không sửa ``board``.
+
+        Ở chế độ time, lần gọi này tự đặt deadline riêng = thời điểm gọi + time_limit_s,
+        không dùng ``self.deadline`` (có thể là None hoặc mốc cũ của lượt trước).
+        ``stats["nodes_visited"]`` được ghi đè theo lần gọi này, không cộng dồn.
         """
+        deadline = perf_counter() + self.budget.time_limit_s if self.budget.mode == "time" else None
+        return self._decide(board, player, deadline)
+
+    def _decide(self, board: np.ndarray, player: int, deadline: float | None) -> Decision:
+        """Ba tầng luật với deadline đã xác định; cập nhật ``stats["nodes_visited"]``."""
         if (not isinstance(board, np.ndarray) or board.ndim != 2 or board.shape[0] == 0
                 or board.shape[0] != board.shape[1] or not np.isin(board, (-1, 0, 1)).all()):
             raise ValueError("Bàn cờ phải là mảng vuông không rỗng, chỉ chứa -1, 0, 1")
@@ -151,38 +194,76 @@ class RuleBasedAgent(BaseAgent):
         player = int(player)
         if self.win_length > board.shape[0]:
             raise ValueError("Độ dài thắng không được lớn hơn kích thước bàn cờ")
-        n_empty = int(np.count_nonzero(board == EMPTY))
-        if n_empty == 0:
+        empty = [(int(r), int(c)) for r, c in np.argwhere(board == EMPTY)]
+        if not empty:
             raise ValueError("Không còn nước đi hợp lệ")
         if has_winner(board, self.win_length):
             raise ValueError("Ván đấu đã kết thúc, không chọn nước đi")
+        stop_at = self._stop_at(deadline)
 
-        self.stats["nodes_visited"] = n_empty
-        wins = winning_moves(board, player, self.win_length)
+        def out_of_time() -> bool:
+            return stop_at is not None and perf_counter() >= stop_at
+
+        # Nước dự phòng chuẩn bị trước khi quét: ứng viên gần tâm nhất, luôn hợp lệ.
+        candidates = candidate_actions(board, self.radius) or empty
+        fallback = min(candidates, key=lambda a: _center_key(a, board.shape[0]))
+        examined = 0
+        self.stats["nodes_visited"] = 0
+
+        def scan(target: int) -> tuple[list[Action], bool]:
+            # Quét toàn bộ ô trống tìm ô giúp `target` thắng ngay; dừng khi tới mốc.
+            nonlocal examined
+            found = []
+            for action in empty:
+                if out_of_time():
+                    return found, True
+                examined += 1
+                if is_winning_move(board, action, target, self.win_length):
+                    found.append(action)
+            return found, False
+
+        def finish(rule: str, actions: list[Action], reason: str, timed_out: bool) -> Decision:
+            self.stats["nodes_visited"] = examined
+            if timed_out:
+                reason = f"hết thời gian sau {examined} ô đã xét; {reason}"
+            return self._pick(board, player, rule, actions, reason, timed_out)
+
+        wins, stopped = scan(player)
         if wins:
-            return self._pick(board, player, RULE_WIN, wins,
-                              f"có {len(wins)} nước thắng ngay")
+            return finish(RULE_WIN, wins, f"có {len(wins)} nước thắng ngay", stopped)
+        if stopped:
+            return finish(RULE_FALLBACK, [fallback], "dừng khi đang quét nước thắng, dùng nước dự phòng", True)
 
-        self.stats["nodes_visited"] += n_empty
-        threats = winning_moves(board, -player, self.win_length)
+        threats, stopped = scan(-player)
         if threats:
             note = " (đe dọa kép: chỉ chặn được một ô)" if len(threats) > 1 else ""
-            return self._pick(board, player, RULE_BLOCK, threats,
-                              f"đối thủ có {len(threats)} ô thắng ngay{note}")
+            return finish(RULE_BLOCK, threats, f"đối thủ có {len(threats)} ô thắng ngay{note}", stopped)
+        if stopped:
+            return finish(RULE_FALLBACK, [fallback], "dừng khi đang quét đe dọa, dùng nước dự phòng", True)
 
-        candidates = candidate_actions(board, self.radius)
-        self.stats["nodes_visited"] += len(candidates)
-        best = max(position_score(board, a, player) for a in candidates)
-        top = [a for a in candidates if position_score(board, a, player) == best]
-        return self._pick(board, player, RULE_FALLBACK, top,
-                          f"chưa có đe dọa; {len(candidates)} ứng viên bán kính {self.radius}, "
-                          f"điểm vị trí cao nhất {best}")
+        scores: dict[Action, int] = {}
+        stopped = False
+        for action in candidates:
+            if out_of_time():
+                stopped = True
+                break
+            examined += 1
+            scores[action] = position_score(board, action, player)
+        if not scores:
+            return finish(RULE_FALLBACK, [fallback], "dừng trước khi chấm điểm, dùng nước dự phòng", True)
+        best = max(scores.values())
+        top = [a for a, score in scores.items() if score == best]
+        return finish(RULE_FALLBACK, top,
+                      f"chưa có đe dọa; chấm {len(scores)}/{len(candidates)} ứng viên bán kính {self.radius}, "
+                      f"điểm vị trí cao nhất {best}", stopped)
 
     @staticmethod
-    def _pick(board: np.ndarray, player: int, rule: str, actions: list[Action], reason: str) -> Decision:
+    def _pick(board: np.ndarray, player: int, rule: str, actions: list[Action], reason: str,
+              timed_out: bool) -> Decision:
         action = min(actions, key=lambda a: rank_key(board, a, player))
-        return Decision(rule, action, tuple(actions), f"{reason}; chọn {action}")
+        return Decision(rule, action, tuple(actions), f"{reason}; chọn {action}", timed_out)
 
     def get_action(self, board: np.ndarray, player: int) -> Action:
-        self.last_decision = self.decide(board, player)
+        # choose_action của BaseAgent đã đặt self.deadline cho lượt này (None ở chế độ fixed).
+        self.last_decision = self._decide(board, player, self.deadline)
         return self.last_decision.action

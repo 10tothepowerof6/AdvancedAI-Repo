@@ -19,6 +19,7 @@ from agents.rule_based_agent import (RULE_BLOCK, RULE_FALLBACK, RULE_WIN, Decisi
                                      winning_moves)
 from config.search_budget import SearchBudget
 from core.game_engine import CaroGame
+from core.game_utils import candidate_actions
 from evaluation.match import play_match
 
 X, O = 1, -1
@@ -408,3 +409,139 @@ def test_play_match_runner():
     rule_logs = [log for log in logs if log["player"] == X]
     assert rule_logs and all(log["status"] == "move" for log in rule_logs)
     assert all(log["stats"]["simulations"] == 0 and log["stats"]["nodes_visited"] > 0 for log in rule_logs)
+
+
+# ---------------------------------------------------------------- ngân sách thời gian (đồng hồ giả)
+
+class _FakeClock:
+    """Đồng hồ giả: mỗi lần đọc tăng 1 ms, không phụ thuộc tốc độ máy."""
+
+    def __init__(self, start=100.0, step=0.001):
+        self.now, self.step = start, step
+
+    def __call__(self):
+        self.now += self.step
+        return self.now
+
+
+def _use_clock(monkeypatch, clock):
+    # BaseAgent đặt deadline và tác tử kiểm tra mốc dừng bằng cùng một đồng hồ.
+    monkeypatch.setattr("agents.base_agent.perf_counter", clock)
+    monkeypatch.setattr("agents.rule_based_agent.perf_counter", clock)
+
+
+def _time_agent(limit):
+    return RuleBasedAgent(budget=SearchBudget(mode="time", time_limit_s=limit))
+
+
+def test_time_mode_past_deadline_returns_prepared_fallback(monkeypatch):
+    # Chuẩn bị: đồng hồ của tác tử luôn báo đã quá mốc dừng; X ở tâm, O ở (6,6).
+    monkeypatch.setattr("agents.rule_based_agent.perf_counter", lambda: float("inf"))
+    game = build([(5, 5)], [(6, 6)], to_move=X)
+    agent = _time_agent(2.0)
+    # Thực thi
+    action = agent.choose_action(game.board, X)
+    # Kiểm chứng: không xét ô nào; trả nước dự phòng chuẩn bị sẵn = ứng viên gần tâm nhất (tính tay:
+    # tâm đã có quân, bốn ô kề thẳng cách Manhattan 1, hàng nhỏ nhất là (4,5)).
+    decision = agent.explain_last_action()
+    assert action == (4, 5)
+    assert decision.rule == RULE_FALLBACK and decision.timed_out
+    assert agent.stats["nodes_visited"] == 0 and "hết thời gian sau 0 ô" in decision.reason
+
+
+def test_time_mode_stops_during_win_scan(monkeypatch):
+    # Chuẩn bị: thế yên tĩnh; hạn 0,15 giây − biên 0,1 → mốc dừng sau khoảng 50 lần đọc đồng hồ giả,
+    # tức là giữa lúc quét nước thắng (bàn còn 119 ô trống).
+    clock = _FakeClock()
+    _use_clock(monkeypatch, clock)
+    game = build([(5, 5)], [(6, 6)], to_move=X)
+    n_empty = int(np.count_nonzero(game.board == 0))
+    agent = _time_agent(0.15)
+    start = clock.now
+    # Thực thi
+    action = agent.choose_action(game.board, X)
+    # Kiểm chứng: dừng trước deadline, số ô đã xét đúng bằng số ghi trong lý do và nhỏ hơn một lượt quét.
+    decision = agent.explain_last_action()
+    examined = agent.stats["nodes_visited"]
+    assert clock.now < start + 0.15
+    assert decision.timed_out and decision.rule == RULE_FALLBACK and action == (4, 5)
+    assert 0 < examined < n_empty
+    assert f"hết thời gian sau {examined} ô đã xét" in decision.reason
+
+
+def test_time_mode_keeps_block_found_before_stop(monkeypatch):
+    # Chuẩn bị: O có bốn quân ở hàng 0, ô thắng (0,4) là ô trống đầu tiên theo thứ tự quét.
+    # Hạn 0,25 giây → mốc dừng sau khoảng 150 lần đọc: quét xong tầng thắng (113 ô), dừng giữa tầng chặn.
+    clock = _FakeClock()
+    _use_clock(monkeypatch, clock)
+    game = build([], [(0, 0), (0, 1), (0, 2), (0, 3)], to_move=X, avoid=[(0, 4)])
+    n_empty = int(np.count_nonzero(game.board == 0))
+    agent = _time_agent(0.25)
+    # Thực thi
+    action = agent.choose_action(game.board, X)
+    # Kiểm chứng: vẫn chặn đúng ô đã tìm thấy, ghi nhận hết giờ và số ô thực sự đã xét.
+    decision = agent.explain_last_action()
+    assert action == (0, 4) and decision.rule == RULE_BLOCK and decision.timed_out
+    assert n_empty < agent.stats["nodes_visited"] < 2 * n_empty
+
+
+def test_time_mode_stops_while_scoring_candidates(monkeypatch):
+    # Chuẩn bị: thế yên tĩnh 119 ô trống; mốc dừng sau khoảng 238 + 10 lần đọc → dừng giữa lúc chấm điểm.
+    clock = _FakeClock()
+    _use_clock(monkeypatch, clock)
+    game = build([(5, 5)], [(6, 6)], to_move=X)
+    n_empty = int(np.count_nonzero(game.board == 0))
+    candidates = candidate_actions(game.board, 2)
+    agent = _time_agent(0.1 + (2 * n_empty + 10) * 0.001)
+    # Thực thi
+    action = agent.choose_action(game.board, X)
+    # Kiểm chứng: chọn trong số ứng viên đã chấm, lý do ghi số ứng viên đã chấm trên tổng.
+    decision = agent.explain_last_action()
+    scored = agent.stats["nodes_visited"] - 2 * n_empty
+    assert decision.rule == RULE_FALLBACK and decision.timed_out
+    assert 0 < scored < len(candidates)
+    assert f"chấm {scored}/{len(candidates)} ứng viên" in decision.reason
+    assert action in candidates[:scored]
+
+
+def test_time_mode_with_enough_time_matches_fixed(monkeypatch):
+    clock = _FakeClock()
+    _use_clock(monkeypatch, clock)
+    game = build([(5, 3), (5, 4), (5, 5)], [(4, 4), (6, 6), (0, 0)], to_move=X)
+    timed = _time_agent(2.0)
+    fixed = RuleBasedAgent()
+    assert timed.choose_action(game.board, X) == fixed.choose_action(game.board, X)
+    assert not timed.explain_last_action().timed_out
+    assert timed.stats["nodes_visited"] == fixed.stats["nodes_visited"]
+
+
+def test_fixed_mode_ignores_clock(monkeypatch):
+    # Chế độ fixed không có mốc dừng: đồng hồ báo quá hạn cũng không làm tác tử dừng sớm.
+    monkeypatch.setattr("agents.rule_based_agent.perf_counter", lambda: float("inf"))
+    agent = RuleBasedAgent()
+    agent.choose_action(CaroGame().board, X)
+    assert not agent.explain_last_action().timed_out
+    assert agent.stats["nodes_visited"] == 243
+
+
+@pytest.mark.parametrize("stale_deadline", [None, 0.0], ids=["deadline_None", "deadline_cu_da_qua"])
+def test_direct_decide_in_time_mode_sets_its_own_deadline(monkeypatch, stale_deadline):
+    # Gọi decide() trực tiếp: tự đặt deadline cho lần gọi, không dùng deadline cũ của lượt trước.
+    clock = _FakeClock()
+    _use_clock(monkeypatch, clock)
+    agent = _time_agent(2.0)
+    agent.deadline = stale_deadline
+    decision = agent.decide(CaroGame().board, X)
+    assert decision.action == (5, 5) and not decision.timed_out
+
+
+def test_internal_decide_without_deadline_in_time_mode_raises():
+    with pytest.raises(ValueError, match="deadline"):
+        _time_agent(2.0)._decide(CaroGame().board, X, None)
+
+
+@pytest.mark.parametrize("margin", [-0.1, True, float("inf"), "0.1"],
+                         ids=["am", "bool", "vo_cuc", "chuoi"])
+def test_rejects_invalid_time_margin(margin):
+    with pytest.raises(ValueError):
+        RuleBasedAgent(time_margin_s=margin)
