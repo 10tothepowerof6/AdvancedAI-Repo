@@ -1,23 +1,31 @@
-"""Tác tử Rule-based cho Caro 11×11 — Giai đoạn 1: luật thắng ngay và chặn thua.
+"""Tác tử Rule-based cho Caro 11×11 - luật thắng/chặn (Giai đoạn 1) và mẫu hình (Giai đoạn 2).
 
 Thứ tự luật (dừng ở tầng đầu tiên có nước):
-1. ``thang_ngay`` — bên đang đi có nước tạo chuỗi từ ``win_length`` quân trở lên.
-2. ``chan_thua`` — đối thủ có nước thắng ngay ở lượt sau; đi vào chính ô đó.
-3. ``du_phong`` — chưa có đe dọa trực tiếp; chọn ô ứng viên theo điểm vị trí đơn giản.
+1. ``win_now`` - bên đang đi có nước tạo chuỗi từ ``win_length`` quân trở lên.
+2. ``block_urgent`` - đối thủ có nước thắng ngay ở lượt sau; đi vào chính ô đó.
+3. ``attack_open_four`` - tạo bốn mở hoặc đe dọa kép (từ hai ô thắng mới trở lên).
+4. ``block_open_four`` - đối thủ có nước tạo bốn mở/đe dọa kép; chọn nước để lại ít nước như vậy nhất.
+5. ``attack_broken_four`` - tạo đúng một ô thắng mới (bốn nửa mở hoặc bốn có khe), buộc đối thủ đáp trả.
+6. ``attack_open_three`` - tạo ba mở: chưa có ô thắng nhưng lượt sau có nước thành bốn mở/đe dọa kép.
+7. ``block_open_three`` - đối thủ có nước tạo ba mở; chiếm ô đó, chọn ô để lại ít nước như vậy nhất.
+8. ``positional_fallback`` - chọn ô ứng viên theo điểm vị trí đơn giản.
 
-Tầng 1 và 2 quét **toàn bộ ô trống** để không bỏ sót đe dọa nằm ngoài bán kính ứng viên.
-Tầng 3 chỉ là baseline giữ cho tác tử luôn trả nước hợp lệ; nhận diện pattern (ba mở,
-bốn mở, chuỗi có khoảng trống...) thuộc Giai đoạn 2.
+``use_patterns=False`` bỏ tầng 3-7, giữ đúng hành vi ba tầng của Giai đoạn 1. Tầng 1 và 2 quét
+**toàn bộ ô trống** để không bỏ sót đe dọa nằm ngoài bán kính ứng viên; tầng 3-8 dùng
+``candidate_actions`` bán kính ``radius`` (mặc định 2).
 
-Mọi hàm chỉ đọc ``board``: nước thử được kiểm tra bằng cách đếm quân hai phía của ô trống,
-không đặt quân tạm lên mảng.
+Mẫu hình được định nghĩa theo nước tiếp theo chứ không theo tổng số quân: một nước thử được xếp loại
+theo số **ô thắng mới** mà nó tạo ra (ô trống mà trước nước thử chưa thắng được, sau nước thử thì đi vào
+là thắng). Các hàm ở đây không sửa ``board``: kiểm tra một nước dùng phép đếm hai phía của ô trống, khi
+cần xét bàn sau nước thử thì đánh thử trên bản sao.
 
 Chế độ ``time``: nước dự phòng hợp lệ được chuẩn bị trước khi quét, mốc dừng hợp tác được kiểm tra
-trước mỗi ô; hết giờ thì trả quyết định tốt nhất đã có (xem ``RuleBasedAgent``).
+trước mỗi ô và trước mỗi nước thử lồng nhau; hết giờ thì trả quyết định tốt nhất đã có (xem ``RuleBasedAgent``).
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from math import isfinite
 from numbers import Integral, Real
@@ -37,10 +45,25 @@ DEFAULT_RADIUS = 2
 # Biên an toàn chế độ time: dừng ở 1,9 giây trên hạn 2,0 giây (theo docs).
 DEFAULT_TIME_MARGIN_S = 0.1
 
-RULE_WIN = "thang_ngay"
-RULE_BLOCK = "chan_thua"
-RULE_FALLBACK = "du_phong"
-RULES: tuple[str, ...] = (RULE_WIN, RULE_BLOCK, RULE_FALLBACK)
+RULE_WIN = "win_now"
+RULE_BLOCK = "block_urgent"
+RULE_ATTACK_OPEN_FOUR = "attack_open_four"
+RULE_BLOCK_OPEN_FOUR = "block_open_four"
+RULE_ATTACK_BROKEN_FOUR = "attack_broken_four"
+RULE_ATTACK_OPEN_THREE = "attack_open_three"
+RULE_BLOCK_OPEN_THREE = "block_open_three"
+RULE_FALLBACK = "positional_fallback"
+# Thứ tự ưu tiên đầy đủ (use_patterns=True) và của baseline Giai đoạn 1 (use_patterns=False).
+RULES: tuple[str, ...] = (RULE_WIN, RULE_BLOCK, RULE_ATTACK_OPEN_FOUR, RULE_BLOCK_OPEN_FOUR,
+                          RULE_ATTACK_BROKEN_FOUR, RULE_ATTACK_OPEN_THREE, RULE_BLOCK_OPEN_THREE, RULE_FALLBACK)
+BASELINE_RULES: tuple[str, ...] = (RULE_WIN, RULE_BLOCK, RULE_FALLBACK)
+
+# Tên mẫu hình trả về từ classify_move.
+PATTERN_FIVE = "five"
+PATTERN_OPEN_FOUR = "open_four"
+PATTERN_BROKEN_FOUR = "broken_four"
+PATTERN_OPEN_THREE = "open_three"
+PATTERN_NONE = "none"
 
 
 def _check_positive_int(value: object, name: str) -> int:
@@ -101,7 +124,7 @@ def position_score(board: np.ndarray, action: Action, player: int) -> int:
 
 
 def rank_key(board: np.ndarray, action: Action, player: int) -> tuple[int, int, int, int, int]:
-    """Khóa xếp hạng tất định, nhỏ hơn là tốt hơn; dùng chung để phá hòa ở cả ba tầng.
+    """Khóa xếp hạng tất định, nhỏ hơn là tốt hơn; dùng chung để phá hòa ở mọi tầng.
 
     Thứ tự: điểm vị trí cao hơn → gần tâm hơn (Chebyshev, rồi Manhattan) → hàng nhỏ hơn → cột nhỏ hơn.
     """
@@ -111,13 +134,125 @@ def rank_key(board: np.ndarray, action: Action, player: int) -> tuple[int, int, 
     return (-position_score(board, action, player), max(dr, dc), dr + dc, row, col)
 
 
+def _never_stop() -> bool:
+    return False
+
+
+def _line_neighbors(board: np.ndarray, action: Action, reach: int) -> list[Action]:
+    """Các ô trên 4 đường đi qua ``action``, cách ``action`` từ 1 đến ``reach`` ô, nằm trong bàn."""
+    size = board.shape[0]
+    row, col = action
+    cells = []
+    for dr, dc in DIRECTIONS:
+        for k in range(-reach, reach + 1):
+            r, c = row + k * dr, col + k * dc
+            if k != 0 and 0 <= r < size and 0 <= c < size:
+                cells.append((r, c))
+    return cells
+
+
+def new_winning_cells(board: np.ndarray, action: Action, player: int,
+                      win_length: int = WIN_LENGTH) -> tuple[Action, ...]:
+    """Các ô thắng mới của ``player`` nếu ``player`` đi ``action``, sắp theo (hàng, cột).
+
+    Ô thắng mới là ô trống mà trước nước thử ``player`` đi vào chưa thắng, sau nước thử thì thắng.
+    Một ô chỉ có thể thành ô thắng mới qua một đoạn ``win_length`` ô chứa cả ``action``, nên chỉ cần xét
+    các đoạn trên 4 đường đi qua ``action``: đoạn hợp lệ khi không chạm mép bàn, không có quân đối thủ,
+    và sau nước thử chỉ còn đúng một ô trống. Mỗi ô được đếm một lần dù nhiều đoạn cùng dẫn tới nó.
+    Trả rỗng nếu ``action`` không trống.
+    """
+    row, col = action
+    if board[row, col] != EMPTY:
+        return ()
+    size = board.shape[0]
+    found = set()
+    for dr, dc in DIRECTIONS:
+        line = []  # phần tử thứ i ứng với độ lệch i - (win_length - 1) so với action
+        for k in range(1 - win_length, win_length):
+            r, c = row + k * dr, col + k * dc
+            if 0 <= r < size and 0 <= c < size:
+                line.append(((r, c), player if k == 0 else int(board[r, c])))
+            else:
+                line.append((None, None))
+        for start in range(win_length):  # mọi đoạn win_length ô có chứa action
+            segment = line[start:start + win_length]
+            if any(cell is None or value == -player for cell, value in segment):
+                continue
+            gaps = [cell for cell, value in segment if value == EMPTY]
+            if len(gaps) == 1:
+                found.add(gaps[0])
+    return tuple(sorted(cell for cell in found if not is_winning_move(board, cell, player, win_length)))
+
+
+def _open_three_followups(board: np.ndarray, action: Action, player: int, win_length: int,
+                          tick: Callable[[], bool], first_only: bool = False) -> tuple[tuple[Action, ...], bool]:
+    """Phần lõi của ``open_three_followups``; ``tick()`` được gọi trước mỗi nước thử lồng nhau.
+
+    ``tick()`` trả True nghĩa là phải dừng; khi đó trả (các nước đã tìm thấy, True).
+    ``first_only`` dừng ở nước tiếp theo đầu tiên tìm được (chỉ cần biết có hay không).
+    """
+    row, col = action
+    if (board[row, col] != EMPTY or is_winning_move(board, action, player, win_length)
+            or new_winning_cells(board, action, player, win_length)):
+        return (), False
+    after = board.copy()
+    after[row, col] = player
+    found = []
+    for move in _line_neighbors(after, action, win_length - 1):
+        if after[move] != EMPTY:
+            continue
+        if tick():
+            return tuple(sorted(found)), True
+        if (len(new_winning_cells(after, move, player, win_length)) >= 2
+                and len(new_winning_cells(board, move, player, win_length)) < 2):
+            found.append(move)
+            if first_only:
+                break
+    return tuple(sorted(found)), False
+
+
+def open_three_followups(board: np.ndarray, action: Action, player: int,
+                         win_length: int = WIN_LENGTH) -> tuple[Action, ...]:
+    """Nước tiếp theo biến ``action`` thành ba mở, sắp theo (hàng, cột); rỗng nếu ``action`` không phải ba mở.
+
+    ``action`` là ba mở khi nó chưa tạo ô thắng nào nhưng sau nó, ``player`` có nước tiếp theo tạo từ hai ô
+    thắng mới trở lên (bốn mở hoặc đe dọa kép) mà trước ``action`` nước đó chưa làm được. Nước như vậy phải
+    nằm trên một đường đi qua ``action``, cách không quá ``win_length - 1`` ô, vì đoạn thắng mới phải chứa
+    cả hai quân. Ba bị chặn (sát biên, quân đối thủ ở đầu) không có nước tiếp theo như vậy nên không khớp.
+    """
+    return _open_three_followups(board, action, player, win_length, _never_stop)[0]
+
+
+def classify_move(board: np.ndarray, action: Action, player: int, win_length: int = WIN_LENGTH) -> str:
+    """Xếp loại nước thử ``action`` của ``player``: five / open_four / broken_four / open_three / none.
+
+    ``five``: thắng ngay. ``open_four``: từ hai ô thắng mới trở lên (bốn mở hai đầu hoặc hai đường giao
+    nhau). ``broken_four``: đúng một ô thắng mới (bốn bị chặn một đầu hoặc bốn có khe). ``open_three``:
+    xem ``open_three_followups``. Ô đã có quân trả ``none``.
+    """
+    row, col = action
+    if board[row, col] != EMPTY:
+        return PATTERN_NONE
+    if is_winning_move(board, action, player, win_length):
+        return PATTERN_FIVE
+    threats = len(new_winning_cells(board, action, player, win_length))
+    if threats >= 2:
+        return PATTERN_OPEN_FOUR
+    if threats == 1:
+        return PATTERN_BROKEN_FOUR
+    if open_three_followups(board, action, player, win_length):
+        return PATTERN_OPEN_THREE
+    return PATTERN_NONE
+
+
 @dataclass(frozen=True)
 class Decision:
     """Truy vết một quyết định; bất biến để bên ngoài không sửa được dữ liệu nội bộ.
 
-    ``acceptable`` là tập nước chấp nhận được của tầng đã kích hoạt (mọi nước thắng ngay,
-    hoặc mọi ô chặn, hoặc mọi ứng viên cùng điểm cao nhất ở tầng dự phòng). Khi ``timed_out``
-    là True, tập này chỉ gồm những ô đã kịp xét trước mốc dừng.
+    ``acceptable`` là tập nước chấp nhận được của tầng đã kích hoạt (mọi nước thắng ngay, mọi ô chặn,
+    mọi nước khớp mẫu hình của tầng, mọi nước chặn để lại ít cơ hội nhất cho đối thủ, hoặc mọi ứng viên
+    cùng điểm cao nhất ở tầng dự phòng). Khi ``timed_out`` là True, tập này chỉ gồm những nước đã kịp xét
+    trước mốc dừng. ``examined`` bằng ``stats["nodes_visited"]`` của lượt đó.
     """
 
     rule: str
@@ -125,6 +260,7 @@ class Decision:
     acceptable: tuple[Action, ...]
     reason: str
     timed_out: bool = False
+    examined: int = 0
 
 
 def _center_key(action: Action, size: int) -> tuple[int, int, int, int]:
@@ -136,23 +272,33 @@ def _center_key(action: Action, size: int) -> tuple[int, int, int, int]:
 
 
 class RuleBasedAgent(BaseAgent):
-    """Rule-based Giai đoạn 1: thắng ngay → chặn thua → dự phòng vị trí; hoàn toàn tất định.
+    """Rule-based theo bảng luật ở đầu module; hoàn toàn tất định, không dùng số ngẫu nhiên.
 
-    ``stats["nodes_visited"]`` đếm số ô **thực sự đã xét** trong lượt: ô trống ở tầng thắng,
-    ô trống ở tầng chặn (nếu tới), ứng viên được chấm điểm ở tầng dự phòng (nếu tới).
+    ``use_patterns=False`` (mặc định, baseline Giai đoạn 1): thắng ngay → chặn thua → dự phòng vị trí.
+    ``use_patterns=True``: thêm tầng 3-7 về mẫu hình. Hai cấu hình dùng chung điểm vị trí, cách phá hòa,
+    bán kính ứng viên và biên an toàn thời gian; khi so sánh nên khai báo cờ tường minh.
+
+    Phá hòa: tầng ``attack_open_four`` ưu tiên nước có nhiều ô thắng mới hơn, ``attack_open_three`` ưu tiên
+    nước có nhiều nước tiếp theo hơn, hai tầng chặn ưu tiên nước để lại ít cơ hội nhất cho đối thủ; sau đó
+    mọi tầng dùng ``rank_key`` (điểm vị trí → gần tâm → hàng → cột).
+
+    ``stats["nodes_visited"]`` đếm số **nước thử thực sự đã xét** trong lượt: mỗi ô trống ở tầng thắng và
+    tầng chặn; mỗi lần xếp loại một ứng viên ở tầng 3-7 cho một bên (kết quả được nhớ lại trong lượt nên
+    không đếm hai lần); mỗi nước thử lồng nhau khi kiểm tra ba mở; mỗi lần kiểm tra lại một nước của đối thủ
+    sau một nước chặn thử; mỗi ứng viên được chấm điểm ở tầng dự phòng. Khi dừng sớm chỉ đếm phần đã làm.
     ``simulations`` và ``pruned_nodes`` luôn 0.
 
     Ngân sách:
       ``fixed``: không có giới hạn thời gian, luôn xét hết các tầng cần thiết.
       ``time``: mốc dừng hợp tác = deadline − min(time_margin_s, 0,5 × time_limit_s). Trước khi quét,
       tác tử chuẩn bị sẵn nước dự phòng hợp lệ (ứng viên gần tâm nhất); mốc dừng được kiểm tra trước
-      mỗi ô ở cả ba tầng. Hết giờ thì trả quyết định tốt nhất đã có: nước thắng hoặc ô chặn đã tìm thấy,
-      nếu không thì ứng viên điểm cao nhất đã chấm, cuối cùng là nước dự phòng chuẩn bị sẵn.
+      mỗi ô, mỗi ứng viên và mỗi nước thử lồng nhau ở mọi tầng. Hết giờ thì trả quyết định tốt nhất đã có
+      của tầng đang xét (nước khớp hoặc nước chặn đã thử xong), nếu chưa có thì nước dự phòng chuẩn bị sẵn.
     """
 
     def __init__(self, name: str = "Rule-based", *, budget: SearchBudget | None = None,
                  radius: int = DEFAULT_RADIUS, win_length: int = WIN_LENGTH,
-                 time_margin_s: float = DEFAULT_TIME_MARGIN_S):
+                 time_margin_s: float = DEFAULT_TIME_MARGIN_S, use_patterns: bool = False):
         super().__init__(name, budget=budget)
         self.radius = _check_positive_int(radius, "Bán kính ứng viên")
         self.win_length = _check_positive_int(win_length, "Độ dài thắng")
@@ -160,7 +306,15 @@ class RuleBasedAgent(BaseAgent):
                 or not isfinite(time_margin_s) or time_margin_s < 0):
             raise ValueError("Biên an toàn thời gian phải là số hữu hạn không âm")
         self.time_margin_s = float(time_margin_s)
+        if not isinstance(use_patterns, (bool, np.bool_)):
+            raise ValueError("use_patterns phải là True hoặc False")
+        self.use_patterns = bool(use_patterns)
         self.last_decision: Decision | None = None
+
+    @property
+    def rules(self) -> tuple[str, ...]:
+        """Thứ tự luật của cấu hình hiện tại."""
+        return RULES if self.use_patterns else BASELINE_RULES
 
     def explain_last_action(self) -> Decision | None:
         """Quyết định của lượt gần nhất (None nếu chưa đi nước nào)."""
@@ -175,7 +329,7 @@ class RuleBasedAgent(BaseAgent):
         return deadline - min(self.time_margin_s, 0.5 * self.budget.time_limit_s)
 
     def decide(self, board: np.ndarray, player: int) -> Decision:
-        """Gọi trực tiếp (ví dụ trong notebook): áp dụng ba tầng luật, không sửa ``board``.
+        """Gọi trực tiếp (ví dụ trong notebook): áp dụng bảng luật của cấu hình, không sửa ``board``.
 
         Ở chế độ time, lần gọi này tự đặt deadline riêng = thời điểm gọi + time_limit_s,
         không dùng ``self.deadline`` (có thể là None hoặc mốc cũ của lượt trước).
@@ -185,7 +339,7 @@ class RuleBasedAgent(BaseAgent):
         return self._decide(board, player, deadline)
 
     def _decide(self, board: np.ndarray, player: int, deadline: float | None) -> Decision:
-        """Ba tầng luật với deadline đã xác định; cập nhật ``stats["nodes_visited"]``."""
+        """Bảng luật với deadline đã xác định; cập nhật ``stats["nodes_visited"]``."""
         if (not isinstance(board, np.ndarray) or board.ndim != 2 or board.shape[0] == 0
                 or board.shape[0] != board.shape[1] or not np.isin(board, (-1, 0, 1)).all()):
             raise ValueError("Bàn cờ phải là mảng vuông không rỗng, chỉ chứa -1, 0, 1")
@@ -222,11 +376,13 @@ class RuleBasedAgent(BaseAgent):
                     found.append(action)
             return found, False
 
-        def finish(rule: str, actions: list[Action], reason: str, timed_out: bool) -> Decision:
+        def finish(rule: str, actions: list[Action], reason: str, timed_out: bool,
+                   strength: Callable[[Action], int] | None = None) -> Decision:
             self.stats["nodes_visited"] = examined
             if timed_out:
-                reason = f"hết thời gian sau {examined} ô đã xét; {reason}"
-            return self._pick(board, player, rule, actions, reason, timed_out)
+                unit = "ô" if not self.use_patterns else "nước thử"
+                reason = f"hết thời gian sau {examined} {unit} đã xét; {reason}"
+            return self._pick(board, player, rule, actions, reason, timed_out, examined, strength)
 
         wins, stopped = scan(player)
         if wins:
@@ -240,6 +396,15 @@ class RuleBasedAgent(BaseAgent):
             return finish(RULE_BLOCK, threats, f"đối thủ có {len(threats)} ô thắng ngay{note}", stopped)
         if stopped:
             return finish(RULE_FALLBACK, [fallback], "dừng khi đang quét đe dọa, dùng nước dự phòng", True)
+
+        if self.use_patterns:
+            def count(n: int = 1) -> None:
+                nonlocal examined
+                examined += n
+
+            decision = self._pattern_rules(board, player, candidates, fallback, out_of_time, count, finish)
+            if decision is not None:
+                return decision
 
         scores: dict[Action, int] = {}
         stopped = False
@@ -257,11 +422,183 @@ class RuleBasedAgent(BaseAgent):
                       f"chưa có đe dọa; chấm {len(scores)}/{len(candidates)} ứng viên bán kính {self.radius}, "
                       f"điểm vị trí cao nhất {best}", stopped)
 
+    def _pattern_rules(self, board: np.ndarray, player: int, candidates: list[Action], fallback: Action,
+                       out_of_time: Callable[[], bool], count: Callable[[int], None],
+                       finish: Callable[..., Decision]) -> Decision | None:
+        """Tầng 3-7 trên ``candidates``; trả None nếu không tầng nào kích hoạt (xuống tầng dự phòng).
+
+        Được gọi sau khi tầng 1-2 không kích hoạt, nên lúc này không bên nào có ô thắng ngay.
+        """
+        win_length = self.win_length
+        opponent = -player
+        threat_cache: dict[tuple[Action, int], tuple[Action, ...]] = {}
+
+        def threats(action: Action, who: int) -> tuple[Action, ...]:
+            # Ô thắng mới nếu `who` đi `action`; nhớ lại trong lượt nên mỗi cặp chỉ đếm một nút.
+            key = (action, who)
+            if key not in threat_cache:
+                count(1)
+                threat_cache[key] = new_winning_cells(board, action, who, win_length)
+            return threat_cache[key]
+
+        def tick() -> bool:
+            # Trước mỗi nước thử lồng nhau: hết giờ thì báo dừng, nếu không thì đếm nước thử đó.
+            if out_of_time():
+                return True
+            count(1)
+            return False
+
+        def show(moves) -> str:
+            moves = sorted(moves)
+            return ", ".join(map(str, moves[:6])) + (f" và {len(moves) - 6} nước khác" if len(moves) > 6 else "")
+
+        def stop_with_fallback(stage: str) -> Decision:
+            return finish(RULE_FALLBACK, [fallback], f"dừng khi đang {stage}, dùng nước dự phòng", True)
+
+        def scan_fours(who: int) -> tuple[dict[Action, tuple[Action, ...]], bool]:
+            found = {}
+            for action in candidates:
+                if out_of_time():
+                    return found, True
+                cells = threats(action, who)
+                if cells:
+                    found[action] = cells
+            return found, False
+
+        # Tầng 3: bốn mở hoặc đe dọa kép của mình.
+        mine, stopped = scan_fours(player)
+        open_fours = {a: cells for a, cells in mine.items() if len(cells) >= 2}
+        if open_fours:
+            return finish(RULE_ATTACK_OPEN_FOUR, list(open_fours),
+                          f"{len(open_fours)} nước tạo từ hai ô thắng mới trở lên ({show(open_fours)})", stopped,
+                          strength=lambda a: len(open_fours[a]))
+        if stopped:
+            return stop_with_fallback("tìm bốn mở của mình")
+
+        # Tầng 4: chặn bốn mở/đe dọa kép của đối thủ trước khi nó hình thành.
+        theirs, stopped = scan_fours(opponent)
+        opp_fours = sorted(a for a, cells in theirs.items() if len(cells) >= 2)
+        if stopped and not opp_fours:
+            return stop_with_fallback("tìm bốn mở của đối thủ")
+        if opp_fours:
+            remaining: dict[Action, int] = {}
+            if not stopped:
+                for action in candidates:
+                    if out_of_time():
+                        stopped = True
+                        break
+                    after = board.copy()
+                    after[action] = player
+                    left = 0
+                    for move in opp_fours:
+                        if move == action:
+                            continue
+                        if tick():
+                            stopped = True
+                            break
+                        # Quân mình chỉ chặn bớt đoạn thắng của đối thủ, không tạo nước bốn mở mới cho
+                        # đối thủ, nên chỉ cần kiểm tra lại các nước bốn mở đã tìm thấy.
+                        if len(new_winning_cells(after, move, opponent, win_length)) >= 2:
+                            left += 1
+                    if stopped:
+                        break  # nước đang thử dở không được tính
+                    remaining[action] = left
+            if not remaining:
+                return finish(RULE_BLOCK_OPEN_FOUR, opp_fours,
+                              f"đối thủ có nước tạo bốn mở/đe dọa kép ({show(opp_fours)}) nhưng chưa kịp thử nước "
+                              "chặn; chiếm một ô đối thủ cần", True)
+            fewest = min(remaining.values())
+            top = [a for a, left in remaining.items() if left == fewest]
+            note = "chặn hết" if fewest == 0 else f"vẫn còn {fewest} nước, không chặn hết được trong một lượt"
+            return finish(RULE_BLOCK_OPEN_FOUR, top,
+                          f"đối thủ có {len(opp_fours)} nước tạo bốn mở/đe dọa kép ({show(opp_fours)}); thử "
+                          f"{len(remaining)}/{len(candidates)} nước chặn, tốt nhất {note}", stopped)
+
+        # Tầng 5: bốn nửa mở hoặc bốn có khe của mình (đúng một ô thắng mới).
+        broken = {a: cells for a, cells in mine.items() if len(cells) == 1}
+        if broken:
+            return finish(RULE_ATTACK_BROKEN_FOUR, list(broken),
+                          f"{len(broken)} nước tạo đúng một ô thắng mới ({show(broken)}), buộc đối thủ chặn", False)
+
+        # Tầng 6: ba mở của mình.
+        threes: dict[Action, tuple[Action, ...]] = {}
+        for action in candidates:
+            if out_of_time():
+                stopped = True
+                break
+            count(1)
+            follow, stopped = _open_three_followups(board, action, player, win_length, tick)
+            if follow:
+                threes[action] = follow
+            if stopped:
+                break
+        if threes:
+            return finish(RULE_ATTACK_OPEN_THREE, list(threes),
+                          f"{len(threes)} nước tạo ba mở ({show(threes)})", stopped,
+                          strength=lambda a: len(threes[a]))
+        if stopped:
+            return stop_with_fallback("tìm ba mở của mình")
+
+        # Tầng 7: ngăn đối thủ tạo ba mở, bằng cách chiếm một trong các ô đó.
+        opp_threes: list[Action] = []
+        for action in candidates:
+            if out_of_time():
+                stopped = True
+                break
+            count(1)
+            follow, stopped = _open_three_followups(board, action, opponent, win_length, tick, first_only=True)
+            if follow:
+                opp_threes.append(action)
+            if stopped:
+                break
+        if stopped and not opp_threes:
+            return stop_with_fallback("tìm ba mở của đối thủ")
+        if opp_threes:
+            # Tới đây tầng 4 không kích hoạt: trong phạm vi ứng viên đối thủ không có nước bốn mở, nên quân
+            # mình chỉ có thể làm mất ba mở của đối thủ chứ không tạo thêm; chỉ cần kiểm tra lại opp_threes.
+            remaining = {}
+            if not stopped:
+                for action in opp_threes:
+                    if out_of_time():
+                        stopped = True
+                        break
+                    after = board.copy()
+                    after[action] = player
+                    left = 0
+                    for move in opp_threes:
+                        if move == action:
+                            continue
+                        if tick():
+                            stopped = True
+                            break
+                        follow, stopped = _open_three_followups(after, move, opponent, win_length, tick,
+                                                                first_only=True)
+                        if stopped:
+                            break
+                        left += bool(follow)
+                    if stopped:
+                        break
+                    remaining[action] = left
+            if not remaining:
+                return finish(RULE_BLOCK_OPEN_THREE, opp_threes,
+                              f"đối thủ có nước tạo ba mở ({show(opp_threes)}) nhưng chưa kịp thử nước chặn", True)
+            fewest = min(remaining.values())
+            top = [a for a, left in remaining.items() if left == fewest]
+            return finish(RULE_BLOCK_OPEN_THREE, top,
+                          f"đối thủ có {len(opp_threes)} nước tạo ba mở ({show(opp_threes)}); thử chiếm "
+                          f"{len(remaining)}/{len(opp_threes)} ô, tốt nhất làm đối thủ chỉ còn {fewest} nước như vậy",
+                          stopped)
+        return None
+
     @staticmethod
     def _pick(board: np.ndarray, player: int, rule: str, actions: list[Action], reason: str,
-              timed_out: bool) -> Decision:
-        action = min(actions, key=lambda a: rank_key(board, a, player))
-        return Decision(rule, action, tuple(actions), f"{reason}; chọn {action}", timed_out)
+              timed_out: bool, examined: int = 0, strength: Callable[[Action], int] | None = None) -> Decision:
+        # strength lớn hơn là tốt hơn; cùng strength thì phá hòa bằng rank_key.
+        def key(a: Action) -> tuple[int, ...]:
+            return ((-strength(a),) if strength else ()) + rank_key(board, a, player)
+        ordered = sorted(actions)
+        action = min(ordered, key=key)
+        return Decision(rule, action, tuple(ordered), f"{reason}; chọn {action}", timed_out, examined)
 
     def get_action(self, board: np.ndarray, player: int) -> Action:
         # choose_action của BaseAgent đã đặt self.deadline cho lượt này (None ở chế độ fixed).

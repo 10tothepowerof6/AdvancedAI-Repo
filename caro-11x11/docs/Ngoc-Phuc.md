@@ -586,3 +586,30 @@ Stage đúng thay đổi của từng cột mốc, kiểm tra `git diff --cached
 - **Mô tả PR.** Mở rộng baseline với các tầng mẫu hình, giải quyết xung đột, phòng thủ nhiều hướng và giới hạn thời gian. Giải thích quyết định bằng notebook phần 5–6. Kèm danh sách file, lệnh chạy, số test thực tế, fixture, hành vi hai cấu hình và giới hạn kỹ thuật.
 - **Thông tin GitHub.** Base `main`, compare `feature/rule-based-task-2`, assignee `@PhucLee23`, reviewer `@10tothepowerof6`, [milestone Báo cáo tiến độ nửa dự án](https://github.com/10tothepowerof6/AdvancedAI-Repo/milestone/2). Thêm `Closes #8` khi đủ tiêu chí nghiệm thu. Kiểm tra diff chỉ chứa phần mở rộng Task 2 trước khi yêu cầu review.
 - **Bàn giao sau merge.** Ghi rõ cách khởi tạo hai cấu hình, điểm vị trí, quy tắc phá hòa, thống kê, mốc dừng và thế cờ kiểm chứng. Đây là thông tin đầu vào để Task 3 chạy đối chứng và thi đấu thử.
+
+### 14.7. Kết quả bàn giao Task 2 Rule-based
+
+**Cách khởi tạo hai cấu hình.** `RuleBasedAgent(use_patterns=True)` là bản đầy đủ 8 tầng; `RuleBasedAgent(use_patterns=False)` (mặc định) giữ đúng ba tầng của Task 1 nên toàn bộ test và notebook phần 1-4 của baseline không đổi. Khi so sánh ở Task 3, khai báo cờ tường minh cho cả hai bên. `agent.rules` trả thứ tự luật của cấu hình đang dùng.
+
+**Tên luật.** Đặt theo bảng ở mục 14.3: `win_now`, `block_urgent`, `attack_open_four`, `block_open_four`, `attack_broken_four`, `attack_open_three`, `block_open_three`, `positional_fallback`. Ba tên của Task 1 (`thang_ngay`, `chan_thua`, `du_phong`) được đổi theo bảng này; test dùng hằng số `RULE_*` nên không phải sửa, notebook phần 1-4 chỉ đổi tên trong bảng luật và output giữ nguyên.
+
+**Nhận diện mẫu hình** (hàm cấp module, chỉ đọc `board`, đánh thử trên bản sao):
+- `new_winning_cells(board, action, player)`: các ô thắng mới, tức ô trước nước thử chưa thắng và sau nước thử thì thắng. Chỉ xét các đoạn 5 ô chứa nước thử, không chạm mép bàn, không có quân đối thủ; mỗi ô đếm một lần.
+- `classify_move`: `open_four` khi từ 2 ô thắng mới trở lên (bốn mở hai đầu hoặc hai đường giao nhau), `broken_four` khi đúng 1 ô, `open_three` khi chưa có ô thắng nhưng có nước tiếp theo tạo từ 2 ô thắng mới mà trước nước thử chưa làm được (`open_three_followups`).
+
+**Thứ tự luật, phạm vi và phá hòa.** Tầng 1-2 quét toàn bộ ô trống; tầng 3-8 dùng `candidate_actions` bán kính 2. Tầng 4 thử từng ứng viên trên bản sao, chọn nước để lại ít nước bốn mở nhất cho đối thủ (chỉ kiểm tra lại các nước bốn mở đã tìm thấy, vì quân mình không tạo thêm nước bốn mở cho đối thủ; test đối chiếu với đếm lại trên toàn bộ ứng viên). Tầng 7 thử chiếm từng ô đối thủ cần để tạo ba mở. Phá hòa: tầng 3 nhiều ô thắng mới hơn, tầng 6 nhiều nước tiếp theo hơn, tầng 4 và 7 ít cơ hội cho đối thủ hơn, sau đó mọi tầng dùng `rank_key` của Task 1. Không dùng số ngẫu nhiên.
+
+**Thống kê và truy vết.** `nodes_visited` khi bật pattern là số nước thử thực sự đã xét: ô trống ở tầng 1-2, mỗi lần xếp loại một ứng viên cho một bên ở tầng 3-7 (nhớ lại trong lượt nên không đếm hai lần), mỗi nước thử lồng nhau khi kiểm tra ba mở, mỗi lần kiểm tra lại một nước của đối thủ sau một nước chặn thử, mỗi ứng viên được chấm ở tầng 8. `simulations` và `pruned_nodes` bằng 0. `explain_last_action()` trả `Decision` bất biến gồm luật, nước chọn, các nước khớp, lý do (có số nước đã thử trên tổng số), `timed_out` và `examined` (bằng `nodes_visited`).
+
+**Ngân sách thời gian.** Giữ cách của Task 1: mốc dừng = deadline - min(`time_margin_s`, 0,5 × `time_limit_s`), mặc định 1,9 giây trên hạn 2,0 giây, nước dự phòng hợp lệ chuẩn bị trước khi quét. Mốc dừng được kiểm tra trước mỗi ô, mỗi ứng viên và mỗi nước thử lồng nhau (quét pattern, kiểm tra ba mở, thử lại phương án phòng thủ). Hết giờ thì trả nước tốt nhất đã có của tầng đang xét (nước khớp hoặc nước chặn đã thử xong), nếu chưa có thì trả nước dự phòng, và lý do ghi số nước thử đã xét.
+
+**Kiểm thử.**
+- `tests/test_rule_based_agent.py`: 259 test đạt (126 test của Task 1 giữ nguyên, 133 test mới). Toàn bộ suite: 760 test đạt.
+- Mẫu hình: ca dương và ca âm ở 4 hướng, hai bên, sát mép, đầu bị chặn, có khe, quân đối thủ ngắt giữa, đe dọa kép hai hướng, ô vốn đã thắng, nước đặt cạnh ba mở có sẵn; đối chiếu `new_winning_cells` với hàm kiểm tra độc lập trên thế cờ giữa ván ngẫu nhiên.
+- Thứ tự luật: từng cặp tầng kề nhau xung đột, cả hai bên; cấu hình tắt pattern chỉ dùng ba tầng; quy tắc phá hòa; thế hồi quy ở mục 14.5 (chọn `(0, 0)`, và kiểm tra `(0, 4)` để O còn `(4, 0)`); đe dọa kép đã hình thành chỉ chặn một ô.
+- Ngân sách: đồng hồ giả cho các ca hết giờ khi quét pattern, khi đang thử nước chặn và trong vòng ba mở lồng nhau; kiểm tra tác tử dừng ngay ở lần đọc giờ đầu tiên quá mốc và mỗi nước thử đều có một lần kiểm tra mốc dừng trước nó.
+- Đã cố ý cài lại 14 lỗi (gồm hai lỗi từng bị chỉ ra ở PR #22: chặn bốn mở theo điểm vị trí thay vì đếm cơ hội còn lại, và không kiểm tra mốc dừng khi thử nước chặn); cả 14 đều bị test bắt.
+
+**Notebook phần 5-6.** Chạy từ kernel mới: 10/10 ví dụ mẫu hình khớp kỳ vọng tính tay; 10/10 ca xung đột luật chọn đúng luật và nước; bản baseline khác bản đầy đủ ở 6/10 ca; đổi màu X/O cho cùng quyết định ở 10/10 ca. Output phần 1-4 giống bản Task 1, chỉ khác tên luật.
+
+**Giới hạn đã biết.** Đe dọa kép đã hình thành chỉ chặn được một ô; đối thủ có hai nhóm quân tách rời cùng tạo được bốn mở thì một lượt không chặn hết; tác tử không đọc chuỗi nước ép buộc dài hơn hai nước; tầng 3-8 bỏ qua nước cách mọi quân hơn 2 ô; tầng 7 chỉ xét các ô đối thủ cần để tạo ba mở; điểm vị trí của tầng dự phòng giữ nguyên Task 1. Chưa đo độ trễ thi đấu bằng `elapsed_s` và chưa thi đấu nhiều ván; phần này thuộc Task 3.
