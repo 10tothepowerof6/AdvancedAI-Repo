@@ -14,9 +14,10 @@ import numpy as np
 import pytest
 
 from agents.random_agent import RandomAgent
-from agents.rule_based_agent import (RULE_BLOCK, RULE_FALLBACK, RULE_WIN, Decision, RuleBasedAgent,
-                                     has_winner, is_winning_move, line_length, position_score,
-                                     winning_moves)
+from agents.rule_based_agent import (PATTERN_BROKEN_FOUR, PATTERN_FIVE, PATTERN_NONE, PATTERN_OPEN_FOUR,
+                                     PATTERN_OPEN_THREE, RULE_BLOCK, RULE_FALLBACK, RULE_WIN, Decision,
+                                     RuleBasedAgent, classify_move, has_winner, is_winning_move, line_length,
+                                     new_winning_cells, open_three_followups, position_score, winning_moves)
 from config.search_budget import SearchBudget
 from core.game_engine import CaroGame
 from core.game_utils import candidate_actions
@@ -545,3 +546,130 @@ def test_internal_decide_without_deadline_in_time_mode_raises():
 def test_rejects_invalid_time_margin(margin):
     with pytest.raises(ValueError):
         RuleBasedAgent(time_margin_s=margin)
+
+
+# ================================================================ Giai đoạn 2: mẫu hình và thứ tự luật
+
+def _oracle_new_wins(board, action, player):
+    """Kiểm tra độc lập: ô trước nước thử chưa thắng, sau nước thử (đặt trên bản sao) thì thắng."""
+    after = board.copy()
+    after[action] = player
+    return {(r, c) for r in range(board.shape[0]) for c in range(board.shape[1])
+            if (r, c) != action and _wins_after(after, (r, c), player) and not _wins_after(board, (r, c), player)}
+
+
+# Bốn hướng; điểm neo chọn sao cho các ô thứ -1..7 của đường đều nằm trong bàn.
+DIRS = {"ngang": ((3, 2), (0, 1)), "doc": ((2, 3), (1, 0)),
+        "cheo_chinh": ((2, 2), (1, 1)), "cheo_phu": ((2, 8), (1, -1))}
+# Điểm neo sát mép: ô thứ -1 của đường nằm ngoài bàn.
+EDGE_DIRS = {"ngang": ((5, 0), (0, 1)), "doc": ((0, 5), (1, 0)),
+             "cheo_chinh": ((0, 3), (1, 1)), "cheo_phu": ((0, 7), (1, -1))}
+DIR_IDS = list(DIRS)
+
+
+def _cells(anchor, step, idx):
+    (r0, c0), (dr, dc) = anchor, step
+    return [(r0 + i * dr, c0 + i * dc) for i in idx]
+
+
+# Mẫu trên một đường: (tên, ô của mình, ô đối thủ, ô nước thử, mẫu kỳ vọng, ô kỳ vọng) theo chỉ số trên đường.
+# Ô kỳ vọng là ô thắng mới (bốn) hoặc nước tiếp theo (ba mở), tính tay theo hình học của đoạn 5 ô.
+LINE_PATTERNS = [
+    ("bon_mo_hai_dau", [1, 2, 3], [], 4, PATTERN_OPEN_FOUR, [0, 5]),
+    ("bon_bi_chan_mot_dau", [1, 2, 3], [0], 4, PATTERN_BROKEN_FOUR, [5]),
+    ("bon_co_khe", [1, 2, 4], [], 5, PATTERN_BROKEN_FOUR, [3]),
+    ("doi_thu_ngat_giua", [1, 2], [3], 4, PATTERN_NONE, []),
+    ("ba_mo_lien", [2, 3], [], 4, PATTERN_OPEN_THREE, [1, 5]),
+    ("ba_mo_co_khe", [2, 3], [], 5, PATTERN_OPEN_THREE, [4]),
+    ("ba_bi_chan_mot_dau", [1, 2], [0], 3, PATTERN_NONE, []),
+    ("hai_quan_cach_xa", [0], [], 4, PATTERN_NONE, []),
+]
+EDGE_PATTERNS = [
+    ("bon_sat_mep", [0, 1, 2], [], 3, PATTERN_BROKEN_FOUR, [4]),
+    ("ba_sat_mep", [0, 1], [], 2, PATTERN_NONE, []),
+]
+
+
+def _line_case(owner, dirs, direction, mine, theirs):
+    anchor, step = dirs[direction]
+    own = _cells(anchor, step, mine)
+    opp = _cells(anchor, step, theirs)
+    game = place(owner, own, opp, to_move=owner, avoid=_cells(anchor, step, range(-1, 8)))
+    return game, anchor, step
+
+
+@SIDES
+@pytest.mark.parametrize("direction", DIR_IDS)
+@pytest.mark.parametrize("name,mine,theirs,move,pattern,expected", LINE_PATTERNS,
+                         ids=[case[0] for case in LINE_PATTERNS])
+def test_line_patterns_four_directions(owner, direction, name, mine, theirs, move, pattern, expected):
+    # Chuẩn bị
+    game, anchor, step = _line_case(owner, DIRS, direction, mine, theirs)
+    action = _cells(anchor, step, [move])[0]
+    want = set(_cells(anchor, step, expected))
+    # Thực thi
+    got = classify_move(game.board, action, owner)
+    # Kiểm chứng: loại mẫu, ô thắng mới (đối chiếu cả hàm kiểm tra độc lập) và nước tiếp theo của ba mở.
+    assert got == pattern
+    if pattern in (PATTERN_OPEN_FOUR, PATTERN_BROKEN_FOUR):
+        assert set(new_winning_cells(game.board, action, owner)) == want == _oracle_new_wins(game.board, action, owner)
+    if pattern == PATTERN_OPEN_THREE:
+        assert set(open_three_followups(game.board, action, owner)) == want
+        assert not new_winning_cells(game.board, action, owner)
+
+
+@SIDES
+@pytest.mark.parametrize("direction", DIR_IDS)
+@pytest.mark.parametrize("name,mine,theirs,move,pattern,expected", EDGE_PATTERNS,
+                         ids=[case[0] for case in EDGE_PATTERNS])
+def test_edge_patterns_four_directions(owner, direction, name, mine, theirs, move, pattern, expected):
+    game, anchor, step = _line_case(owner, EDGE_DIRS, direction, mine, theirs)
+    action = _cells(anchor, step, [move])[0]
+    assert classify_move(game.board, action, owner) == pattern
+    assert set(new_winning_cells(game.board, action, owner)) == set(_cells(anchor, step, expected))
+
+
+def test_double_threat_across_two_lines_counts_distinct_cells():
+    # O có ba quân ở hàng 0 và ba quân ở cột 0; O đi (0,0) tạo hai ô thắng ở hai hướng khác nhau.
+    game = build([(5, 5), (6, 7), (9, 9)], [(0, 1), (0, 2), (0, 3), (1, 0), (2, 0), (3, 0)], to_move=O)
+    assert new_winning_cells(game.board, (0, 0), O) == ((0, 4), (4, 0))
+    assert classify_move(game.board, (0, 0), O) == PATTERN_OPEN_FOUR
+
+
+def test_cell_already_winning_is_not_new():
+    # X đã có bốn quân (5,1)-(5,4), ô (5,5) thắng sẵn. Nước (5,6) cũng dẫn tới (5,5) nhưng ô đó không mới.
+    game = build([(5, 1), (5, 2), (5, 3), (5, 4)], [(0, 0), (0, 2), (0, 4), (0, 6)], to_move=X)
+    assert is_winning_move(game.board, (5, 5), X)
+    assert new_winning_cells(game.board, (5, 6), X) == ()
+
+
+def test_existing_open_four_move_does_not_make_neighbor_an_open_three():
+    # X có ba mở (5,3)-(5,5): (5,2) và (5,6) vốn đã tạo được bốn mở. Nước (4,6) không góp gì vào đó,
+    # nên không được tính là ba mở chỉ vì sau nó vẫn còn các nước bốn mở cũ.
+    game = build([(5, 3), (5, 4), (5, 5)], [(0, 0), (0, 2), (0, 4)], to_move=X)
+    assert len(new_winning_cells(game.board, (5, 6), X)) == 2
+    assert open_three_followups(game.board, (4, 6), X) == ()
+    assert classify_move(game.board, (4, 6), X) == PATTERN_NONE
+
+
+def test_classify_five_and_occupied():
+    game = build([(5, 1), (5, 2), (5, 3), (5, 4)], [(0, 0), (0, 2), (0, 4), (0, 6)], to_move=X)
+    assert classify_move(game.board, (5, 5), X) == PATTERN_FIVE
+    assert classify_move(game.board, (5, 1), X) == PATTERN_NONE
+    assert new_winning_cells(game.board, (5, 1), X) == () and open_three_followups(game.board, (5, 1), X) == ()
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_new_winning_cells_matches_oracle_on_random_positions(seed):
+    # Chuẩn bị: thế cờ giữa ván từ hai RandomAgent.
+    game, rand = CaroGame(), RandomAgent(seed=seed)
+    for _ in range(30):
+        game.step(rand.choose_action(game.board, game.current_player))
+        if game.is_terminal():
+            pytest.skip("ván kết thúc sớm")
+    board = game.board
+    # Thực thi và kiểm chứng trên mọi ứng viên bán kính 1, cho cả hai bên.
+    for action in candidate_actions(board, 1):
+        for player in (X, O):
+            assert set(new_winning_cells(board, action, player)) == _oracle_new_wins(board, action, player)
+

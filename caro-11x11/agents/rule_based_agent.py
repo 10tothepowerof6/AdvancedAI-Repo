@@ -18,6 +18,7 @@ trước mỗi ô; hết giờ thì trả quyết định tốt nhất đã có 
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from math import isfinite
 from numbers import Integral, Real
@@ -41,6 +42,13 @@ RULE_WIN = "thang_ngay"
 RULE_BLOCK = "chan_thua"
 RULE_FALLBACK = "du_phong"
 RULES: tuple[str, ...] = (RULE_WIN, RULE_BLOCK, RULE_FALLBACK)
+
+# Tên mẫu hình trả về từ classify_move.
+PATTERN_FIVE = "five"
+PATTERN_OPEN_FOUR = "open_four"
+PATTERN_BROKEN_FOUR = "broken_four"
+PATTERN_OPEN_THREE = "open_three"
+PATTERN_NONE = "none"
 
 
 def _check_positive_int(value: object, name: str) -> int:
@@ -109,6 +117,116 @@ def rank_key(board: np.ndarray, action: Action, player: int) -> tuple[int, int, 
     center = board.shape[0] // 2
     dr, dc = abs(row - center), abs(col - center)
     return (-position_score(board, action, player), max(dr, dc), dr + dc, row, col)
+
+def _never_stop() -> bool:
+    return False
+
+
+def _line_neighbors(board: np.ndarray, action: Action, reach: int) -> list[Action]:
+    """Các ô trên 4 đường đi qua ``action``, cách ``action`` từ 1 đến ``reach`` ô, nằm trong bàn."""
+    size = board.shape[0]
+    row, col = action
+    cells = []
+    for dr, dc in DIRECTIONS:
+        for k in range(-reach, reach + 1):
+            r, c = row + k * dr, col + k * dc
+            if k != 0 and 0 <= r < size and 0 <= c < size:
+                cells.append((r, c))
+    return cells
+
+
+def new_winning_cells(board: np.ndarray, action: Action, player: int,
+                      win_length: int = WIN_LENGTH) -> tuple[Action, ...]:
+    """Các ô thắng mới của ``player`` nếu ``player`` đi ``action``, sắp theo (hàng, cột).
+
+    Ô thắng mới là ô trống mà trước nước thử ``player`` đi vào chưa thắng, sau nước thử thì thắng.
+    Một ô chỉ có thể thành ô thắng mới qua một đoạn ``win_length`` ô chứa cả ``action``, nên chỉ cần xét
+    các đoạn trên 4 đường đi qua ``action``: đoạn hợp lệ khi không chạm mép bàn, không có quân đối thủ,
+    và sau nước thử chỉ còn đúng một ô trống. Mỗi ô được đếm một lần dù nhiều đoạn cùng dẫn tới nó.
+    Trả rỗng nếu ``action`` không trống.
+    """
+    row, col = action
+    if board[row, col] != EMPTY:
+        return ()
+    size = board.shape[0]
+    found = set()
+    for dr, dc in DIRECTIONS:
+        line = []  # phần tử thứ i ứng với độ lệch i - (win_length - 1) so với action
+        for k in range(1 - win_length, win_length):
+            r, c = row + k * dr, col + k * dc
+            if 0 <= r < size and 0 <= c < size:
+                line.append(((r, c), player if k == 0 else int(board[r, c])))
+            else:
+                line.append((None, None))
+        for start in range(win_length):  # mọi đoạn win_length ô có chứa action
+            segment = line[start:start + win_length]
+            if any(cell is None or value == -player for cell, value in segment):
+                continue
+            gaps = [cell for cell, value in segment if value == EMPTY]
+            if len(gaps) == 1:
+                found.add(gaps[0])
+    return tuple(sorted(cell for cell in found if not is_winning_move(board, cell, player, win_length)))
+
+
+def _open_three_followups(board: np.ndarray, action: Action, player: int, win_length: int,
+                          tick: Callable[[], bool], first_only: bool = False) -> tuple[tuple[Action, ...], bool]:
+    """Phần lõi của ``open_three_followups``; ``tick()`` được gọi trước mỗi nước thử lồng nhau.
+
+    ``tick()`` trả True nghĩa là phải dừng; khi đó trả (các nước đã tìm thấy, True).
+    ``first_only`` dừng ở nước tiếp theo đầu tiên tìm được (chỉ cần biết có hay không).
+    """
+    row, col = action
+    if (board[row, col] != EMPTY or is_winning_move(board, action, player, win_length)
+            or new_winning_cells(board, action, player, win_length)):
+        return (), False
+    after = board.copy()
+    after[row, col] = player
+    found = []
+    for move in _line_neighbors(after, action, win_length - 1):
+        if after[move] != EMPTY:
+            continue
+        if tick():
+            return tuple(sorted(found)), True
+        if (len(new_winning_cells(after, move, player, win_length)) >= 2
+                and len(new_winning_cells(board, move, player, win_length)) < 2):
+            found.append(move)
+            if first_only:
+                break
+    return tuple(sorted(found)), False
+
+
+def open_three_followups(board: np.ndarray, action: Action, player: int,
+                         win_length: int = WIN_LENGTH) -> tuple[Action, ...]:
+    """Nước tiếp theo biến ``action`` thành ba mở, sắp theo (hàng, cột); rỗng nếu ``action`` không phải ba mở.
+
+    ``action`` là ba mở khi nó chưa tạo ô thắng nào nhưng sau nó, ``player`` có nước tiếp theo tạo từ hai ô
+    thắng mới trở lên (bốn mở hoặc đe dọa kép) mà trước ``action`` nước đó chưa làm được. Nước như vậy phải
+    nằm trên một đường đi qua ``action``, cách không quá ``win_length - 1`` ô, vì đoạn thắng mới phải chứa
+    cả hai quân. Ba bị chặn (sát biên, quân đối thủ ở đầu) không có nước tiếp theo như vậy nên không khớp.
+    """
+    return _open_three_followups(board, action, player, win_length, _never_stop)[0]
+
+
+def classify_move(board: np.ndarray, action: Action, player: int, win_length: int = WIN_LENGTH) -> str:
+    """Xếp loại nước thử ``action`` của ``player``: five / open_four / broken_four / open_three / none.
+
+    ``five``: thắng ngay. ``open_four``: từ hai ô thắng mới trở lên (bốn mở hai đầu hoặc hai đường giao
+    nhau). ``broken_four``: đúng một ô thắng mới (bốn bị chặn một đầu hoặc bốn có khe). ``open_three``:
+    xem ``open_three_followups``. Ô đã có quân trả ``none``.
+    """
+    row, col = action
+    if board[row, col] != EMPTY:
+        return PATTERN_NONE
+    if is_winning_move(board, action, player, win_length):
+        return PATTERN_FIVE
+    threats = len(new_winning_cells(board, action, player, win_length))
+    if threats >= 2:
+        return PATTERN_OPEN_FOUR
+    if threats == 1:
+        return PATTERN_BROKEN_FOUR
+    if open_three_followups(board, action, player, win_length):
+        return PATTERN_OPEN_THREE
+    return PATTERN_NONE
 
 
 @dataclass(frozen=True)
