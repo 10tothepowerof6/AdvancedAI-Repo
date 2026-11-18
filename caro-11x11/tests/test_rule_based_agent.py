@@ -1,6 +1,6 @@
-"""Kiểm thử Rule-based - Giai đoạn 1 (thắng ngay, chặn thua, dự phòng) và Giai đoạn 2 (mẫu hình, thứ tự luật).
+"""Kiểm thử Rule-based: Giai đoạn 1 (thắng ngay, chặn thua, dự phòng), Giai đoạn 2 (mẫu hình, thứ tự luật) và Giai đoạn 3 (đánh giá thành phần, thi đấu và cấu trúc log).
 
-Các test Giai đoạn 1 dùng cấu hình mặc định ``use_patterns=False``; phần Giai đoạn 2 ở cuối file.
+Các test Giai đoạn 1 dùng cấu hình mặc định ``use_patterns=False``; phần Giai đoạn 2 và 3 ở nửa sau của file.
 
 Thế cờ được dựng bằng CaroGame.step() qua chuỗi nước hợp lệ (engine không có API nạp bàn cờ).
 Nước thắng/chặn kỳ vọng được tính tay theo hình học của chuỗi; trong ván đầy đủ, kết quả
@@ -1228,17 +1228,20 @@ def test_broken_four_limit_when_no_followup_threat():
     )
 
 
-def test_time_mode_practical_latency_well_below_limit():
-    # Chuẩn bị: cấu hình chế độ time với giới hạn 2,0 giây qua play_match.
-    factory_rule = partial(RuleBasedAgent, name=_PATTERN_NAME, use_patterns=True)
-    factory_random = partial(RandomAgent, seed=7)
-    budget = SearchBudget(mode="time", time_limit_s=2.0)
+def test_time_mode_cooperative_stop_respects_time_margin(monkeypatch):
+    # Chuẩn bị: đồng hồ giả với ngân sách 2,0 giây và biên an toàn 0,1 giây.
+    clock = _RecordingClock(start=100.0, step=0.005)
+    _use_recording_clock(monkeypatch, clock)
+    game = _regression_game()
+    agent = RuleBasedAgent(name=_PATTERN_NAME, use_patterns=True, time_margin_s=0.1,
+                           budget=SearchBudget(mode="time", time_limit_s=2.0))
     # Thực thi
-    record, logs = play_match(factory_rule, factory_random, agent_x=_PATTERN_NAME, agent_o="RandomAgent",
-                              budget=budget)
-    rule_logs = [entry for entry in logs if entry["player"] == X]
-    # Kiểm chứng: ván kết thúc hợp lệ, không quá giờ và độ trễ thực tế dưới 0,5 giây mỗi lượt.
-    assert record.reason == "completed"
-    assert rule_logs
-    assert all(entry["status"] == "move" and not entry["stats"].get("timed_out", False) for entry in rule_logs)
-    assert all(entry["elapsed_s"] < 0.5 for entry in rule_logs)
+    action = agent.choose_action(game.board, X)
+    decision = agent.explain_last_action()
+    # Kiểm chứng: dừng tìm kiếm trước deadline khi chạm mốc an toàn, bật timed_out và trả nước hợp lệ.
+    stop_at = agent.deadline - agent.time_margin_s
+    assert decision.timed_out is True
+    assert clock.agent_reads[-1] >= stop_at
+    assert _reads_past_stop(clock, agent) == 1
+    assert clock.now < agent.deadline
+    assert game.board[action] == 0 and action in decision.acceptable

@@ -346,16 +346,17 @@ Thiết lập hai cấu hình tác tử đối chứng độc lập nhằm cô l
 ### 12.2. Bảng tổng hợp kết quả thực nghiệm thực tế
 
 #### A. Đánh giá tác dụng thành phần (Thực nghiệm loại trừ trên 21 thế cờ chiến thuật)
-Kết hợp 11 thế cờ cơ bản (Mục 3) và 10 thế cờ xung đột chiến thuật (Mục 6) trong `notebooks/01_rule_based.ipynb`:
+Thực nghiệm tổng hợp 11 thế cờ cơ bản (Mục 3) và 10 thế cờ xung đột chiến thuật (Mục 6) trong `notebooks/01_rule_based.ipynb`. Đánh giá gồm hai chỉ số: chất lượng nước đi xét trên tập nước chấp nhận được và tỷ lệ kích hoạt đúng tầng luật kỳ vọng ở 10 thế Mục 6:
 
 | Chỉ số đo lường | Full Pattern (`use_patterns=True`) | No Pattern (`use_patterns=False`) | Đánh giá & So sánh |
 | :--- | :--- | :--- | :--- |
-| **Tổng số thế cờ thử nghiệm** | 21 | 21 | Bộ thế cờ chuẩn hóa |
-| **Số thế giải đúng tối ưu** | **21/21 (100,0%)** | 15/21 (71,4%) | Tăng +28,6% (+6 thế cờ) |
-| **Thế cờ mẫu hình trung cuộc (Mục 6)** | **10/10 (100,0%)** | 4/10 (40,0%) | Baseline bỏ lỡ 6/10 thế mẫu hình |
+| **Tổng số thế cờ thử nghiệm** | 21 (Mục 3: 11, Mục 6: 10) | 21 (Mục 3: 11, Mục 6: 10) | Bộ thế cờ chuẩn hóa |
+| **Nước đi đúng tập kỳ vọng (trên 21)** | **21/21 (100,0%)** | 15/21 (71,4%) | Tăng +28,6% (+6 thế cờ) |
+| **Nước đi đúng tập kỳ vọng ở Mục 3 / Mục 6** | **11/11** và **10/10** | **11/11** và 4/10 | Baseline chọn nước ngoài tập kỳ vọng ở 6/10 thế Mục 6 |
+| **Đúng tên luật kỳ vọng ở Mục 6 (trên 10)** | **10/10 (100,0%)** | 4/10 (40,0%) | Baseline chỉ khớp các thế thắng, chặn khẩn cấp và dự phòng |
 | **Số nước thử trung bình (`nodes_visited`)** | 495,5 nước | 205,0 nước | Tăng do duyệt qua 8 tầng luật |
-| **Thời gian tính toán trung bình (`thinking_time`)** | 7,68 ms | 0,88 ms | Nằm trong ngưỡng an toàn |
-| **Phân bố tầng luật kích hoạt** | `positional_fallback`: 3, `win_now`: 6, `block_urgent`: 5, `block_open_four`: 3, `attack_open_four`: 1, `attack_broken_four`: 1, `attack_open_three`: 1, `block_open_three`: 1 | `positional_fallback`: 10, `win_now`: 6, `block_urgent`: 5 | Baseline rơi về nước vị trí ở mọi thế trung cuộc |
+| **Thời gian tính toán trung bình (`thinking_time`)** | 15,14 ms | 1,84 ms | Nằm trong ngưỡng an toàn |
+| **Phân bố tầng luật kích hoạt** | `positional_fallback`: 3, `win_now`: 6, `block_urgent`: 5, `block_open_four`: 3, `attack_open_four`: 1, `attack_broken_four`: 1, `attack_open_three`: 1, `block_open_three`: 1 | `positional_fallback`: 10, `win_now`: 6, `block_urgent`: 5 | Baseline rơi về nước vị trí ở mọi thế mẫu hình trung cuộc |
 
 6 thế cờ có sự phân hóa nước đi giữa hai cấu hình (Mục 6):
 1. **Bốn mở của mình trước chặn bốn mở:** Pattern kích hoạt `attack_open_four` đi (5, 6) để chủ động tạo hai ô thắng độc lập; Baseline rơi về `positional_fallback` đi (4, 4).
@@ -366,7 +367,7 @@ Kết hợp 11 thế cờ cơ bản (Mục 3) và 10 thế cờ xung đột chi�
 6. **Phòng thủ nhiều hướng (thế hồi quy):** Pattern kích hoạt `block_open_four` đi (0, 0) giảm thiểu số nước tạo đe dọa kép; Baseline rơi về `positional_fallback` đi (8, 9).
 
 #### B. Đối đầu trực tiếp giữa hai biến thể (2 ván đổi bên)
-Vì hai cấu hình hoàn toàn tất định (Deterministic) nên một cặp hai ván đổi bên phản ánh trọn vẹn quỹ đạo thi đấu:
+Vì hai cấu hình hoàn toàn tất định nên một cặp hai ván đổi bên phản ánh trọn vẹn quỹ đạo thi đấu:
 
 | Ván đấu | Bên cầm X (Đi trước) | Bên cầm O (Đi sau) | Kết quả | Số nước kết thúc | Bước ngoặt quyết định |
 | :---: | :--- | :--- | :---: | :---: | :--- |
@@ -375,18 +376,19 @@ Vì hai cấu hình hoàn toàn tất định (Deterministic) nên một cặp h
 
 *Tổng kết đối đầu:* Full Pattern thắng **2/2 ván (100,0%)**, điểm số 1,0, không có ván nào bị xử thua.
 
-#### C. Thi đấu thử nghiệm với `RandomAgent` (khớp số liệu Mục 8 Notebook)
+#### C. Thi đấu thử nghiệm với `RandomAgent` (khớp số liệu Mục 8 Notebook & tệp `results/rule_based_random_benchmark.json`)
+Toàn bộ biên bản và `logs` từng nước đi của 60 ván đấu được lưu vào tệp `results/rule_based_random_benchmark.json` và trực tiếp tổng hợp qua `summarize_results` và `summarize_latencies`:
 
 | Cấu hình tác tử | Chế độ ngân sách | Số ván đấu | Thắng / Hòa / Thua | Tỷ lệ thắng (Score) | Lỗi xử thua (Forfeits) | Độ dài ván tb | Độ trễ tb (`mean_s`) | Độ trễ p95 (`p95_s`) | Thời gian tính tb |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **Rule-based (Pattern)** | `fixed` | 20 | 20 / 0 / 0 | **100,0%** | 0 | **9,6 nước** | 19,61 ms | 53,91 ms | 19,37 ms |
-| **Rule-based (Baseline)** | `fixed` | 20 | 20 / 0 / 0 | **100,0%** | 0 | 18,6 nước | 1,33 ms | 2,03 ms | 1,19 ms |
-| **Rule-based (Pattern)** | `time` (2,0 giây) | 10 | 10 / 0 / 0 | **100,0%** | 0 | **9,5 nước** | 18,63 ms | 49,56 ms | 18,42 ms |
-| **Rule-based (Baseline)** | `time` (2,0 giây) | 10 | 10 / 0 / 0 | **100,0%** | 0 | 19,1 nước | 1,30 ms | 1,59 ms | 1,18 ms |
+| **Rule-based (Pattern)** | `fixed` | 20 | 20 / 0 / 0 | **100,0%** | 0 | **9,6 nước** | 22,67 ms | 59,03 ms | 22,14 ms |
+| **Rule-based (Baseline)** | `fixed` | 20 | 20 / 0 / 0 | **100,0%** | 0 | 18,6 nước | 1,87 ms | 2,85 ms | 1,50 ms |
+| **Rule-based (Pattern)** | `time` (2,0 giây) | 10 | 10 / 0 / 0 | **100,0%** | 0 | **9,5 nước** | 21,04 ms | 57,80 ms | 20,53 ms |
+| **Rule-based (Baseline)** | `time` (2,0 giây) | 10 | 10 / 0 / 0 | **100,0%** | 0 | 19,1 nước | 1,79 ms | 2,63 ms | 1,49 ms |
 
 *Nhận xét:*
 - Biến thể Pattern đạt độ dài ván trung bình 9,5–9,6 nước, kết thúc ván sớm hơn gần một nửa số nước so với Baseline (18,6–19,1 nước) nhờ các tầng nhận diện ba mở và bốn mở chủ động tạo đe dọa liên tiếp.
-- Thời gian tính toán trung bình của Pattern từ 18,4 đến 19,4 ms mỗi nước, giá trị phân vị p95 dưới 54 ms, thấp hơn mốc dừng hợp tác 1,9 giây trên tổng ngân sách 2,0 giây của hệ thống.
+- Trên máy thử nghiệm, thời gian tính toán trung bình của Pattern từ 20,5 đến 22,1 ms mỗi nước, giá trị phân vị p95 dưới 60 ms (độ trễ thực tế mỗi lượt đều dưới 0,5 giây), thấp hơn mốc dừng hợp tác 1,9 giây trên tổng ngân sách 2,0 giây của hệ thống.
 
 ---
 
@@ -397,7 +399,7 @@ Vì hai cấu hình hoàn toàn tất định (Deterministic) nên một cặp h
    Khi đối thủ sở hữu hai hướng ba mở độc lập ở hai khu vực cách xa nhau trên bàn cờ, mỗi hướng đều có tiềm năng tạo bốn mở hai đầu. Do tác tử chỉ đánh giá phản xạ tham lam một bước và mỗi lượt chỉ đi một nước, tác tử chỉ chặn được một hướng, hướng còn lại đối thủ vẫn tạo được bốn mở và giành chiến thắng. Tình huống này đòi hỏi thuật toán tìm kiếm cây nhiều bước (như Minimax hoặc MCTS) để phát hiện và ngăn chặn từ các nước trước đó.
 3. **Tầng `attack_broken_four` và `positional_fallback` — Bán kính ứng viên và thiếu tầm nhìn phối hợp:**
    - Tầng `attack_broken_four` tạo ra nước bốn một ô thắng nhằm ép đối thủ chặn, nhưng nếu đối thủ chặn thành công và ta không còn nước nối tiếp tạo đe dọa kép thì thế công bị triệt tiêu hoàn toàn (hết ô thắng dự trữ).
-   - Việc giới hạn không gian ứng viên trong bán kính `radius=2` quanh các quân cờ hiện có giúp kiểm soát thời gian phản hồi ở mức dưới 20 ms, nhưng có thể bỏ qua các vị trí chiến lược ở khoảng cách xa trong giai đoạn đầu ván cờ.
+   - Việc giới hạn không gian ứng viên trong bán kính `radius=2` quanh các quân cờ hiện có giúp kiểm soát thời gian phản hồi ở mức khoảng 20–22 ms, nhưng có thể bỏ qua các vị trí chiến lược ở khoảng cách xa trong giai đoạn đầu ván cờ.
 
 ---
 
