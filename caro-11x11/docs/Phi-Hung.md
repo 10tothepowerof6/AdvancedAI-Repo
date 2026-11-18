@@ -523,8 +523,8 @@ chọn theo Q/N thay vì N, đếm mô phỏng bị bỏ, rollout từ trạng t
 
 **Kiểm thử:**
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests/test_mcts_agent.py -v   # 143 passed, 0 failed (108 GĐ1–2 + 35 GĐ3)
-.\.venv\Scripts\python.exe -m pytest tests -v                      # 809 passed, 0 failed
+.\.venv\Scripts\python.exe -m pytest tests/test_mcts_agent.py -v   # 147 passed, 0 failed (108 GĐ1–2 + 39 GĐ3)
+.\.venv\Scripts\python.exe -m pytest tests -v                      # 813 passed, 0 failed
 ```
 Nhóm test Giai đoạn 3: `winning_cells` tính tay (bốn mở, bốn bị chặn, có khoảng trống, nối thành sáu) và đối chiếu với kiểm tra độc
 lập trên 12 thế ngẫu nhiên; thứ tự ưu tiên của `tactical_candidates` (thắng trước chặn, không lọc khi không có đe dọa, terminal);
@@ -538,25 +538,35 @@ sâu; bản chuẩn không lọc; tái lập theo seed; phát lại bốn bướ
 **Notebook:** hoàn thiện mục 7–10 của `notebooks/03_mcts.ipynb` (khoảng 20–25 phút từ kernel mới trên máy ở Giai đoạn 0).
 - Cấu hình đóng băng: 6 vị trí (3 của mục 6 + `chan_ba_mo`, `tao_bon_mo`, `giua_van`), seed 0–9 (`fixed`) và 0–4 (`time`),
   bán kính 2, c = √2, biên 0,1 giây.
-- Khảo sát bản chuẩn (5 vị trí có đáp án): đúng 3/50, 25/50, 30/50 ở 100 / 500 / 1.000 mô phỏng; 21/25 ở `time` 2,0 giây.
-  Khó nhất là `chan_ba_mo` (1/5 ở `time`). Ở chế độ `time` có 1 lần (gọi agent trực tiếp, vị trí `tao_bon_mo`) thời gian suy nghĩ
-  chạm mốc 2,0 giây.
+- Khảo sát bản chuẩn (5 vị trí có đáp án): đúng 3/50, 25/50, 30/50 ở 100 / 500 / 1.000 mô phỏng; 22/25 ở `time` 2,0 giây.
+  Khó nhất là `chan_ba_mo` (2/5 ở `time`). Lần chạy sau review không lượt nào chạm 2,0 giây; lần chạy trước có 1 lần (gọi agent
+  trực tiếp, vị trí `tao_bon_mo`).
 - Đấu `RandomAgent` qua `play_match`: 20/20 thắng ở `fixed` 1.000 và 20/20 ở `time` 2,0 giây; 0 timeout, 0 lỗi.
-- Biến thể `tactical`: `chan_ba_mo` 5/5 và `tao_bon_mo` 5/5 ở `time`; mỗi mô phỏng chậm hơn khoảng 2,5 lần. Đối đầu bản chuẩn:
-  17/20 khi cùng 1.000 mô phỏng, 5/10 khi cùng 2,0 giây (mẫu nhỏ, phụ thuộc máy).
+- Biến thể `tactical`: `chan_ba_mo` 4/5 và `tao_bon_mo` 5/5 ở `time`; mỗi mô phỏng chậm hơn khoảng 2,5 lần. Đối đầu bản chuẩn:
+  17/20 khi cùng 1.000 mô phỏng, 6/10 khi cùng 2,0 giây (lần chạy trước 5/10; mẫu nhỏ, phụ thuộc máy).
 - Cấu hình bàn giao: `variant="standard"`, `time` 2,0 giây, c = √2, bán kính 2, biên 0,1 giây; `tactical` giữ làm biến thể có tên
   cho giải đấu chính thức.
 
 **Hạn chế đã biết:**
 - Chưa đánh giá c, bán kính, tái sử dụng cây, đối thủ khác Random, giải đấu ≥ 100 ván/cặp và máy khác.
 - Đối đầu chế độ `time` chỉ có 10 ván, chưa đủ để kết luận bên mạnh hơn.
-- Biên dừng 0,1 giây là dừng hợp tác, không phải bảo đảm tuyệt đối: khảo sát mục 7 có 1 lần chạm mốc 2,0 giây (90 ván qua runner
-  không có timeout).
+- Biên dừng 0,1 giây là dừng hợp tác, không phải bảo đảm tuyệt đối: một lần chạy khảo sát mục 7 có 1 lần chạm mốc 2,0 giây (90 ván qua
+  runner không có timeout).
 - Số mô phỏng ở chế độ `time` phụ thuộc mạnh vào vị trí (vị trí có nước thắng ngay chạy nhiều hơn hàng chục lần) nên trung bình
   số mô phỏng không so sánh trực tiếp được giữa hai biến thể.
 - Luật chiến thuật chỉ nhìn một nước; đe dọa kép vẫn là giới hạn của thế cờ.
 
-*Trạng thái tài liệu: Giai đoạn 1–2 đã merge; Giai đoạn 3 đã cài đặt và kiểm thử cục bộ, chờ PR.*
+**Sửa theo review PR #59:** phần tổng hợp thi đấu ở mục 8–9 trước đây đọc `stats` của mọi lượt nên sẽ dừng notebook khi có lượt
+timeout / lỗi (log runner của các lượt này không có `stats`), và định dạng độ trễ `None` khi không có lượt hợp lệ.
+- Tách thành hai hàm thuần trong `agents/mcts_agent.py` để kiểm thử được:
+  - `summarize_series`: W/D/L, điểm, số ván xử thua trên mọi ván; độ trễ và số mô phỏng chỉ từ lượt `move`;
+    lượt timeout / lỗi đếm riêng; không có lượt `move` thì trả `None`.
+  - `check_series_logs`: kiểm tra chế độ / giới hạn ở mọi lượt, số mô phỏng chỉ ở lượt `move`.
+- Notebook hiển thị "chưa có dữ liệu" thay cho `None`, thêm cột `ván xử thua` và `lượt timeout/lỗi`.
+- 4 test mới: toàn bộ ván timeout ngay lượt đầu (dữ liệu dựng tay và ván thật qua `play_match` với agent luôn quá giờ),
+  hỗn hợp lượt `move` và lượt lỗi, log sai bị từ chối.
+
+*Trạng thái tài liệu: Giai đoạn 1–2 đã merge; Giai đoạn 3 mở PR #59, đã sửa theo review lần 1.*
 
 ---
 

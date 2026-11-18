@@ -9,13 +9,16 @@ Các test dài chia ba phần: Chuẩn bị (dựng thế cờ) / Thực thi (g�
 
 from functools import partial
 from math import inf, log, sqrt
+from time import sleep
 
 import numpy as np
 import pytest
 
+from agents.base_agent import BaseAgent
 from agents.mcts_agent import (DEFAULT_RADIUS, VARIANTS, MCTSAgent, MCTSNode, MCTSState, backpropagate,
-                               best_action, outcome_value, rollout, select_child, tactical_candidates,
-                               tactical_rollout, uct_score, winning_cells)
+                               best_action, check_series_logs, outcome_value, rollout, select_child,
+                               summarize_series, tactical_candidates, tactical_rollout, uct_score,
+                               winning_cells)
 from agents.random_agent import RandomAgent
 from config.search_budget import SearchBudget
 from core.game_engine import CaroGame
@@ -915,3 +918,89 @@ def test_shared_metrics_on_known_records():
     latency = summarize_latencies([0.1, 0.2, 0.3, 0.4, 0.5])
     assert latency["count"] == 5 and latency["mean_s"] == pytest.approx(0.3)
     assert latency["p95_s"] == pytest.approx(0.48)   # nội suy tuyến tính: 0,4 + 0,8 × 0,1
+
+
+# ---------------------------------------------------------------------------
+# Tổng hợp log runner khi có lượt timeout / lỗi (summarize_series, check_series_logs)
+# ---------------------------------------------------------------------------
+
+class SleepyAgent(BaseAgent):
+    """Agent luôn quá giờ: dùng để tạo ván xử thua do timeout thật qua runner."""
+
+    def __init__(self):
+        super().__init__("Chậm")
+
+    def get_action(self, board, player):
+        sleep(10)
+        return (0, 0)
+
+
+def _turn(ply, status, elapsed, simulations=None, mode="fixed", limit=30.0):
+    # Một dòng log giống runner: chỉ lượt "move" có action và stats.
+    entry = {"player": 1, "ply": ply, "mode": mode, "limit_s": limit,
+             "budget": {"simulations": 100, "depth": 3, "time_limit_s": 2.0},
+             "status": status, "elapsed_s": elapsed}
+    if status == "move":
+        entry.update(action=(5, 5), stats={"simulations": simulations})
+    else:
+        entry["error"] = "thử nghiệm"
+    return entry
+
+
+def test_summarize_series_all_games_timeout_on_first_turn():
+    # Hai ván, MCTS quá giờ ngay lượt đầu của mình (cầm X ở nước 1, cầm O ở nước 2): không có lượt "move".
+    records = [MatchRecord("MCTS", "Ngẫu nhiên", -1, "timeout"), MatchRecord("Ngẫu nhiên", "MCTS", 1, "timeout")]
+    logs = [_turn(1, "timeout", 2.05, mode="time", limit=2.0), _turn(2, "timeout", 2.03, mode="time", limit=2.0)]
+    summary = summarize_series(records, logs, "MCTS")
+    assert (summary["games"], summary["wins"], summary["draws"], summary["losses"]) == (2, 0, 0, 2)
+    assert summary["score"] == 0.0 and summary["forfeits"] == 2
+    assert summary["forfeit_reasons"] == {"timeout": 2, "agent_error": 0, "illegal_action": 0}
+    assert summary["moves"] == 0 and summary["failed_turns"] == {"timeout": 2}
+    for key in ("latency_mean_s", "latency_p95_s", "simulations_mean", "simulations_min", "simulations_max"):
+        assert summary[key] is None
+    check_series_logs(logs, SearchBudget(mode="time", time_limit_s=2.0))   # không đòi stats ở lượt timeout
+
+
+def test_summarize_series_mixed_moves_and_failures():
+    # Độ trễ và mô phỏng chỉ lấy từ lượt "move"; lượt lỗi (độ trễ 9,0 s) không được tính vào độ trễ.
+    records = [MatchRecord("MCTS", "Ngẫu nhiên", 1), MatchRecord("Ngẫu nhiên", "MCTS", 1, "agent_error")]
+    logs = [_turn(1, "move", 0.2, 100), _turn(3, "move", 0.4, 100), _turn(2, "agent_error", 9.0)]
+    summary = summarize_series(records, logs, "MCTS")
+    assert (summary["wins"], summary["losses"], summary["forfeits"]) == (1, 1, 1)
+    assert summary["moves"] == 2 and summary["failed_turns"] == {"agent_error": 1}
+    assert summary["latency_mean_s"] == pytest.approx(0.3)
+    assert summary["latency_p95_s"] == pytest.approx(0.39)   # 0,2 + 0,95 × 0,2
+    assert (summary["simulations_mean"], summary["simulations_min"], summary["simulations_max"]) == (100.0, 100, 100)
+    check_series_logs(logs, SearchBudget(simulations=100))
+
+
+def test_check_series_logs_rejects_bad_entries():
+    budget = SearchBudget(simulations=100)
+    with pytest.raises(ValueError, match="số mô phỏng"):
+        check_series_logs([_turn(1, "move", 0.2, 99)], budget)
+    with pytest.raises(ValueError, match="chế độ"):
+        check_series_logs([_turn(1, "timeout", 2.0, mode="time", limit=2.0)], budget)
+    with pytest.raises(ValueError, match="status"):
+        check_series_logs([_turn(1, "unknown", 0.1)], budget)
+    check_series_logs([], budget)
+
+
+def test_series_tools_on_real_runner_timeouts():
+    # Ván thật qua play_match: agent "Chậm" quá giờ ngay lượt đầu ở cả hai bên; log timeout không có stats.
+    budget = SearchBudget(simulations=12)
+    records, slow_logs, mcts_logs = [], [], []
+    for slow_side in (1, -1):
+        fx, fo = (SleepyAgent, partial(MCTSAgent, seed=1)) if slow_side == 1 else (partial(MCTSAgent, seed=1), SleepyAgent)
+        names = ("Chậm", "MCTS") if slow_side == 1 else ("MCTS", "Chậm")
+        record, logs = play_match(fx, fo, agent_x=names[0], agent_o=names[1], budget=budget, safety_timeout_s=0.5)
+        records.append(record)
+        slow_logs += [log for log in logs if log["player"] == slow_side]
+        mcts_logs += [log for log in logs if log["player"] == -slow_side]
+    assert [r.reason for r in records] == ["timeout", "timeout"]
+    assert all("stats" not in log for log in slow_logs)
+    slow = summarize_series(records, slow_logs, "Chậm")
+    assert (slow["losses"], slow["forfeits"], slow["moves"]) == (2, 2, 0)
+    assert slow["failed_turns"] == {"timeout": 2} and slow["latency_mean_s"] is None
+    mcts = summarize_series(records, mcts_logs, "MCTS")
+    assert (mcts["wins"], mcts["forfeits"], mcts["moves"], mcts["simulations_min"]) == (2, 0, 1, 12)
+    check_series_logs(slow_logs + mcts_logs, budget, safety_timeout_s=0.5)

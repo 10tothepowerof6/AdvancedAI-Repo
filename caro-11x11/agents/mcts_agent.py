@@ -35,14 +35,18 @@ Biến thể (Giai đoạn 3), chọn bằng tham số `variant` của MCTSAgent
       có ô thắng ngay thì chỉ giữ các ô chặn; ngược lại giữ ứng viên bán kính như bản chuẩn
       (kỹ thuật "decisive / anti-decisive moves"; số ứng viên bị bỏ được đếm vào `pruned_nodes`);
   (b) rollout: cùng luật trên ở mỗi nước, còn lại đi ngẫu nhiên như bản chuẩn (tactical_rollout()).
+
+Hỗ trợ đánh giá (Giai đoạn 3): summarize_series() và check_series_logs() đọc log lượt của runner
+play_match. Chỉ lượt có status "move" mang stats; lượt timeout / lỗi được đếm riêng.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from math import inf, isfinite, log, sqrt
 from numbers import Integral, Real
 from time import perf_counter
-from typing import Callable
+from typing import Callable, Iterable, Mapping
 
 import numpy as np
 
@@ -51,6 +55,7 @@ from config.game_config import EMPTY, PLAYER_O, PLAYER_X, WIN_LENGTH
 from config.search_budget import SearchBudget
 from core.game_engine import Action, CaroGame
 from core.game_utils import candidate_actions
+from evaluation.metrics import MatchRecord, summarize_latencies, summarize_results
 
 # Bán kính ứng viên mặc định, trùng với candidate_actions của dự án.
 DEFAULT_RADIUS = 2
@@ -607,3 +612,55 @@ class MCTSAgent(BaseAgent):
         root, fallback = self._search(board, player, self.deadline, None)
         action = best_action(root, self.rng)
         return fallback if action is None else action
+
+
+# ---------------------------------------------------------------------------
+# Hỗ trợ đánh giá: tổng hợp log lượt của runner play_match
+# ---------------------------------------------------------------------------
+
+_FAILED_STATUSES = ("timeout", "agent_error", "illegal_action")
+
+
+def summarize_series(records: Iterable[MatchRecord], logs: Iterable[Mapping[str, object]],
+                     agent: str) -> dict[str, object]:
+    """Tổng hợp một loạt ván của `agent` chơi qua play_match.
+
+    - W/D/L, điểm và số ván xử thua tính bằng summarize_results trên mọi ván, kể cả ván kết thúc
+      vì timeout hoặc lỗi.
+    - Độ trễ (summarize_latencies) và số mô phỏng chỉ lấy từ lượt có status "move": log timeout / lỗi
+      không có stats. Không có lượt "move" nào thì các giá trị này là None (chưa có dữ liệu).
+    - Lượt timeout / lỗi của `agent` được đếm riêng theo status.
+    `logs` chỉ gồm lượt của `agent`; lượt thiếu khóa "stats" hoặc "status" không làm hàm lỗi.
+    """
+    result = summarize_results(records, agent)
+    logs = list(logs)
+    moves = [entry for entry in logs if entry.get("status") == "move"]
+    failed = Counter(str(entry.get("status")) for entry in logs if entry.get("status") != "move")
+    latency = summarize_latencies([entry["elapsed_s"] for entry in moves])
+    simulations = [entry["stats"]["simulations"] for entry in moves]
+    return {"games": result["total"], "wins": result["wins"], "draws": result["draws"],
+            "losses": result["losses"], "score": result["score"],
+            "forfeits": sum(result["forfeits"].values()), "forfeit_reasons": result["forfeits"],
+            "moves": latency["count"], "failed_turns": dict(failed),
+            "latency_mean_s": latency["mean_s"], "latency_p95_s": latency["p95_s"],
+            "simulations_mean": float(np.mean(simulations)) if simulations else None,
+            "simulations_min": min(simulations) if simulations else None,
+            "simulations_max": max(simulations) if simulations else None}
+
+
+def check_series_logs(logs: Iterable[Mapping[str, object]], budget: SearchBudget,
+                      safety_timeout_s: float = 30.0) -> None:
+    """Kiểm tra toàn vẹn log lượt; phát sinh ValueError nếu sai.
+
+    Mọi lượt ghi đúng chế độ và giới hạn của cấu hình; status là "move" hoặc một lý do xử thua của
+    runner. Ở chế độ fixed, số mô phỏng chỉ được kiểm tra trên lượt "move" (lượt timeout / lỗi không có stats).
+    """
+    limit = budget.time_limit_s if budget.mode == "time" else safety_timeout_s
+    for entry in logs:
+        status = entry.get("status")
+        if status != "move" and status not in _FAILED_STATUSES:
+            raise ValueError(f"Lượt {entry.get('ply')}: status không hợp lệ {status!r}")
+        if entry.get("mode") != budget.mode or entry.get("limit_s") != limit:
+            raise ValueError(f"Lượt {entry.get('ply')}: sai chế độ hoặc giới hạn thời gian")
+        if status == "move" and budget.mode == "fixed"                 and entry["stats"]["simulations"] != budget.simulations:
+            raise ValueError(f"Lượt {entry.get('ply')}: số mô phỏng khác ngân sách {budget.simulations}")
