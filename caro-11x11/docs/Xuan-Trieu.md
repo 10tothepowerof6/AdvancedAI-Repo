@@ -228,3 +228,11 @@ Nhóm trưởng trực tiếp quản lý các module dùng chung sau:
 - **Liên kết Issue:** Gắn đúng mã Task 1–3 thuộc mảng Neural Network. Chỉ dùng từ khóa `Closes` kèm số issue GitHub (`#10`, `#11`, `#12`) khi đã hoàn thành toàn bộ yêu cầu của task; không dùng cú pháp "Task 1/2/3".
 - **Nội dung mô tả PR:** Bắt buộc phải có phạm vi triển khai, lệnh kiểm thử đã chạy, số liệu thực nghiệm, tài liệu tham khảo và các hạn chế kỹ thuật.
 - **Lưu ý cấu hình GitHub:** Các trường thông tin (Reviewer, Assignee, Milestone) phải được chọn trực tiếp trong thanh bên (sidebar) của giao diện GitHub; việc chỉ đề cập tên trong phần mô tả sẽ không tự động kích hoạt gán người hay mốc. Nhánh `main` đã thiết lập quy tắc bảo vệ bắt buộc phải có ít nhất một phê duyệt (approval) từ thành viên khác trước khi merge (áp dụng cho cả quyền quản trị viên).
+
+## 10. Bàn giao mã Giai đoạn 3
+
+- `agents/neural_agent.py` nạp checkpoint một lần, suy luận CPU một luồng và dùng legal mask. `evaluation/registry.py` tạo tác tử cho tiến trình con; Rule-based bật pattern, MCTS dùng bản chuẩn đang có trên main.
+- `evaluation/tournament.py` lập lịch đổi bên theo seed, lưu từng ván bằng ghi tệp tạm rồi thay thế, phát lại để kiểm tra khi chạy tiếp và khóa thư mục chống chạy chồng. `evaluation/analyze.py` tổng hợp W/D/L, score, độ trễ, thống kê từng bên và bootstrap theo cặp seed.
+- `evaluation/ablations.py` thực hiện hai đối chứng trên cùng sáu vị trí. `app/demo.py` cung cấp demo Tkinter người–máy và máy–máy. Test giao diện và giải đấu đặt phẳng tại `tests/test_demo.py`, `tests/test_tournament.py`; test Neural giữ ở `tests/test_neural_agent.py`.
+- Hướng dẫn chạy và lưu kết quả ở [Chay-giai-dau-va-demo.md](Chay-giai-dau-va-demo.md). Hai notebook được bổ sung phần suy luận và phân tích từ log thực tế.
+- Đã chạy pilot 20 ván fixed và 20 ván time để kiểm tra tích hợp, không có ván xử thua do lỗi hoặc quá giờ. Giải chính thức tối thiểu 100 ván/cặp ở mỗi chế độ do nhóm trưởng tự chạy theo quyết định ngày 18/11/2026. Sau khi đủ số liệu mới hoàn thiện báo cáo, slide, poster và nghiệm thu toàn bộ Task 3.

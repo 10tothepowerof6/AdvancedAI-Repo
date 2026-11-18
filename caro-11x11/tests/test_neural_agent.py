@@ -15,6 +15,7 @@ from training.generate_data import generate_dataset
 from training.model import CaroPolicy, load_policy, mask_occupied, save_policy
 from training.tactical_agent import TacticalAgent
 from training.train import _run_epoch
+from agents.neural_agent import NeuralAgent
 
 
 def _position(moves):
@@ -188,3 +189,35 @@ def test_checkpoint_restores_same_logits(tmp_path):
     assert not restored.training
     with torch.inference_mode():
         torch.testing.assert_close(restored(boards), model(boards), atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("player", (1, -1))
+def test_neural_agent_uses_current_player_perspective(player):
+    agent = NeuralAgent()
+    board = np.zeros((11, 11), dtype=np.int8)
+    board[5, 5], board[4, 6] = 1, -1
+    snapshot = board.copy()
+    normalized = normalize_board(board, player)
+    features = torch.tensor(np.stack((normalized == 1, normalized == -1)), dtype=torch.float32)[None]
+    with torch.inference_mode():
+        expected = mask_occupied(agent.model(features), features).argmax().item()
+    action = agent.choose_action(board, player)
+    assert action == divmod(expected, 11)
+    assert board[action] == 0
+    np.testing.assert_array_equal(board, snapshot)
+    assert agent.stats["thinking_time"] >= 0
+
+
+def test_neural_agent_only_empty_cell_and_missing_checkpoint(tmp_path):
+    agent = NeuralAgent()
+    board = np.ones((11, 11), dtype=np.int8)
+    board[2, 7] = 0
+    assert agent.choose_action(board, -1) == (2, 7)
+    with pytest.raises(FileNotFoundError, match="Không tìm thấy checkpoint"):
+        NeuralAgent(tmp_path / "missing.pt")
+    corrupted = tmp_path / "corrupted.pt"
+    corrupted.write_bytes(b"checkpoint khong hop le")
+    with pytest.raises(ValueError, match="Không nạp được checkpoint"):
+        NeuralAgent(corrupted)
+    with pytest.raises(ValueError, match="Không còn nước"):
+        agent.choose_action(np.ones((11, 11), dtype=np.int8), 1)
