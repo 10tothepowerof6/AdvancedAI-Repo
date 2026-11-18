@@ -28,6 +28,7 @@ from config.search_budget import SearchBudget
 from core.game_engine import CaroGame
 from core.game_utils import candidate_actions
 from evaluation.match import play_match
+from evaluation.metrics import MatchRecord, summarize_latencies, summarize_results
 
 X, O = 1, -1
 
@@ -1034,3 +1035,210 @@ def test_pattern_fixed_mode_ignores_clock(monkeypatch):
     agent = _pattern_agent()
     assert agent.choose_action(_regression_game().board, X) == (0, 0)
     assert not agent.explain_last_action().timed_out
+
+
+# ===========================================================================
+# GIAI ĐOẠN 3 — Đánh giá bật/tắt pattern, cấu trúc log và module chỉ số dùng chung
+# ===========================================================================
+
+_PATTERN_NAME = "Rule-based (Pattern)"
+_BASELINE_NAME = "Rule-based (Baseline)"
+_NO_FORFEITS = {"timeout": 0, "agent_error": 0, "illegal_action": 0}
+_LOG_KEYS = {"player", "ply", "mode", "limit_s", "budget", "status", "action", "stats", "elapsed_s"}
+_STATS_KEYS = {"thinking_time", "nodes_visited", "simulations", "pruned_nodes"}
+
+
+def _ablation_positions():
+    # (tên, thế cờ X đến lượt, tầng luật kỳ vọng của bản bật pattern)
+    return [
+        ("tạo bốn mở", place(X, [(5, 3), (5, 4), (5, 5)], [(0, 0), (0, 10), (10, 0)], to_move=X),
+         RULE_ATTACK_OPEN_FOUR),
+        ("chặn bốn mở", place(O, [(5, 3), (5, 4), (5, 5)], [(0, 0), (0, 10), (10, 0)], to_move=X),
+         RULE_BLOCK_OPEN_FOUR),
+        ("tạo bốn một ô thắng", place(X, [(3, 5), (4, 5), (5, 5)], [(2, 5), (0, 0), (10, 10)], to_move=X),
+         RULE_ATTACK_BROKEN_FOUR),
+        ("tạo ba mở", place(X, [(5, 4), (5, 5)], [(2, 8), (3, 8)], to_move=X), RULE_ATTACK_OPEN_THREE),
+        ("chặn ba mở", place(O, [(5, 4), (5, 5)], [(0, 0), (0, 10)], to_move=X), RULE_BLOCK_OPEN_THREE),
+        ("thế hồi quy nhiều hướng", _regression_game(), RULE_BLOCK_OPEN_FOUR),
+    ]
+
+
+@pytest.mark.parametrize("name, game, expected_rule", _ablation_positions(),
+                         ids=[case[0] for case in _ablation_positions()])
+def test_ablation_pattern_on_vs_off_on_pattern_positions(name, game, expected_rule):
+    # Chuẩn bị: hai cấu hình chỉ khác cờ use_patterns.
+    full = RuleBasedAgent(name=_PATTERN_NAME, use_patterns=True)
+    base = RuleBasedAgent(name=_BASELINE_NAME, use_patterns=False)
+    snapshot = game.board.copy()
+    # Thực thi
+    full_action = full.choose_action(game.board, X)
+    full_decision = full.explain_last_action()
+    base_action = base.choose_action(game.board, X)
+    base_decision = base.explain_last_action()
+    # Kiểm chứng: bản bật pattern kích hoạt đúng tầng 3-7, bản tắt pattern rơi về tầng dự phòng.
+    assert full_decision.rule == expected_rule, f"{name}: kỳ vọng {expected_rule}, nhận {full_decision.rule}"
+    assert full_action in full_decision.acceptable
+    assert base_decision.rule == RULE_FALLBACK, f"{name}: bản tắt pattern phải về {RULE_FALLBACK}"
+    assert base_action in base_decision.acceptable
+    np.testing.assert_array_equal(game.board, snapshot)
+
+
+def test_ablation_pattern_off_keeps_win_block_rules_and_config():
+    # Chuẩn bị
+    full = RuleBasedAgent(name=_PATTERN_NAME, use_patterns=True)
+    base = RuleBasedAgent(name=_BASELINE_NAME, use_patterns=False)
+    fillers = [(0, 0), (0, 10), (10, 0), (10, 10)]
+    win_game = place(X, [(5, 2), (5, 3), (5, 4), (5, 5)], fillers, to_move=X)
+    block_game = place(O, [(5, 2), (5, 3), (5, 4), (5, 5)], fillers, to_move=X)
+    quiet_game = place(X, [(5, 5)], [(6, 6)], to_move=X)
+    # Thực thi
+    pairs = {label: (full.decide(game.board, X), base.decide(game.board, X))
+             for label, game in (("thắng", win_game), ("chặn", block_game), ("yên tĩnh", quiet_game))}
+    # Kiểm chứng: tắt pattern không làm đổi bán kính, độ dài thắng, biên an toàn thời gian.
+    assert (full.radius, full.win_length, full.time_margin_s) == (base.radius, base.win_length,
+                                                                  base.time_margin_s) == (2, 5, 0.1)
+    assert (full.use_patterns, base.use_patterns) == (True, False)
+    # Luật thắng ngay và chặn thua giữ nguyên ở cả hai cấu hình, cùng nước đi và cùng tập nước chấp nhận được.
+    for label, rule in (("thắng", RULE_WIN), ("chặn", RULE_BLOCK), ("yên tĩnh", RULE_FALLBACK)):
+        full_decision, base_decision = pairs[label]
+        assert full_decision.rule == base_decision.rule == rule, label
+        assert full_decision.action == base_decision.action, label
+        assert full_decision.acceptable == base_decision.acceptable, label
+
+
+@pytest.mark.parametrize("budget", [SearchBudget(mode="fixed"), SearchBudget(mode="time", time_limit_s=2.0)],
+                         ids=["fixed", "time"])
+def test_play_match_log_structure_with_pattern_agent(budget):
+    # Chuẩn bị: factory dùng partial để pickle được khi runner tạo tiến trình con bằng spawn.
+    factory_rule = partial(RuleBasedAgent, name=_PATTERN_NAME, use_patterns=True)
+    factory_random = partial(RandomAgent, seed=42)
+    # Thực thi
+    record, logs = play_match(factory_rule, factory_random, agent_x=_PATTERN_NAME, agent_o="RandomAgent",
+                              budget=budget)
+    # Kiểm chứng: biên bản ván đấu và từng bản ghi nước đi.
+    assert isinstance(record, MatchRecord)
+    assert record.reason == "completed" and record.winner in (-1, 0, 1)
+    assert [entry["ply"] for entry in logs] == list(range(1, len(logs) + 1))
+    for entry in logs:
+        assert _LOG_KEYS <= set(entry)
+        assert entry["mode"] == budget.mode and entry["status"] == "move"
+        assert entry["player"] == (X if entry["ply"] % 2 == 1 else O)
+        assert entry["limit_s"] > 0
+        assert isinstance(entry["budget"], dict)
+        assert isinstance(entry["action"], tuple) and all(type(v) is int for v in entry["action"])
+        assert _STATS_KEYS <= set(entry["stats"])
+        assert entry["stats"]["thinking_time"] >= 0.0 and entry["elapsed_s"] >= 0.0
+        if entry["player"] == X:
+            # Tác tử luật luôn xét ít nhất một nước thử; không dùng mô phỏng hay cắt tỉa.
+            assert entry["stats"]["nodes_visited"] > 0
+            assert entry["stats"]["simulations"] == entry["stats"]["pruned_nodes"] == 0
+    if budget.mode == "time":
+        assert all(entry["limit_s"] == budget.time_limit_s for entry in logs)
+
+
+@pytest.mark.parametrize("budget", [SearchBudget(mode="fixed"), SearchBudget(mode="time", time_limit_s=2.0)],
+                         ids=["fixed", "time"])
+def test_decision_trace_after_move(budget):
+    # Chuẩn bị: thế chặn bốn mở có nhiều nước khớp, chạy trong cùng tiến trình để đọc được Decision.
+    game = place(O, [(5, 3), (5, 4), (5, 5)], [(0, 0), (0, 10), (10, 0)], to_move=X)
+    agent = RuleBasedAgent(name=_PATTERN_NAME, use_patterns=True, budget=budget)
+    # Thực thi
+    action = agent.choose_action(game.board, X)
+    decision = agent.explain_last_action()
+    # Kiểm chứng: đủ sáu trường truy vết, khớp với nước trả về và thống kê của lượt.
+    assert isinstance(decision, Decision)
+    assert {f.name for f in dataclasses.fields(decision)} == {
+        "rule", "action", "acceptable", "reason", "timed_out", "examined"}
+    assert decision.rule == RULE_BLOCK_OPEN_FOUR
+    assert decision.action == action and action in decision.acceptable
+    assert isinstance(decision.reason, str) and decision.reason
+    assert decision.timed_out is False
+    assert decision.examined == agent.stats["nodes_visited"] > 0
+
+
+def test_summarize_results_and_latencies_on_known_records():
+    # Chuẩn bị: bốn ván đổi màu, có hòa và một ván xử thua do quá giờ.
+    records = [
+        MatchRecord("A", "B", winner=X),                      # A cầm X thắng
+        MatchRecord("B", "A", winner=O),                      # A cầm O thắng
+        MatchRecord("A", "B", winner=0),                      # hòa
+        MatchRecord("B", "A", winner=X, reason="timeout"),    # A cầm O quá giờ, B thắng
+    ]
+    # Thực thi
+    summary_a = summarize_results(records, "A")
+    summary_b = summarize_results(records, "B")
+    empty_results = summarize_results([], "A")
+    latencies = summarize_latencies([0.01, 0.02, 0.03, 0.04, 0.05])
+    empty_latencies = summarize_latencies([])
+    # Kiểm chứng: quy đổi góc nhìn X/O, điểm = (thắng + 0,5 × hòa) / số ván, đếm ván xử thua.
+    assert (summary_a["wins"], summary_a["draws"], summary_a["losses"], summary_a["total"]) == (2, 1, 1, 4)
+    assert summary_a["score"] == pytest.approx(2.5 / 4)
+    assert summary_a["forfeits"] == {"timeout": 1, "agent_error": 0, "illegal_action": 0}
+    assert (summary_b["wins"], summary_b["draws"], summary_b["losses"], summary_b["total"]) == (1, 1, 2, 4)
+    assert summary_b["score"] == pytest.approx(1.5 / 4)
+    # Ván xử thua chỉ tính cho bên vi phạm (A), không tính cho bên được xử thắng (B).
+    assert summary_b["forfeits"] == _NO_FORFEITS
+    assert empty_results["total"] == 0 and empty_results["score"] is None
+    assert latencies["count"] == 5
+    assert latencies["mean_s"] == pytest.approx(0.03)
+    assert latencies["mean_s"] <= latencies["p95_s"] <= 0.05
+    assert empty_latencies == {"count": 0, "mean_s": None, "p95_s": None}
+
+
+def test_pattern_vs_baseline_swapped_colors_via_play_match():
+    # Chuẩn bị: hai tác tử tất định, một cặp ván đổi màu quân là đủ đại diện.
+    factory_full = partial(RuleBasedAgent, name=_PATTERN_NAME, use_patterns=True)
+    factory_base = partial(RuleBasedAgent, name=_BASELINE_NAME, use_patterns=False)
+    fixed = SearchBudget(mode="fixed")
+    # Thực thi
+    record_1, logs_1 = play_match(factory_full, factory_base, agent_x=_PATTERN_NAME, agent_o=_BASELINE_NAME,
+                                  budget=fixed)
+    record_2, logs_2 = play_match(factory_base, factory_full, agent_x=_BASELINE_NAME, agent_o=_PATTERN_NAME,
+                                  budget=fixed)
+    summary_full = summarize_results([record_1, record_2], _PATTERN_NAME)
+    summary_base = summarize_results([record_1, record_2], _BASELINE_NAME)
+    # Kiểm chứng: hai ván kết thúc bình thường, kết quả hai góc nhìn đối xứng, không có ván xử thua.
+    assert record_1.reason == record_2.reason == "completed"
+    assert logs_1 and logs_2
+    assert summary_full["total"] == summary_base["total"] == 2
+    assert summary_full["wins"] == summary_base["losses"] and summary_full["losses"] == summary_base["wins"]
+    assert summary_full["forfeits"] == summary_base["forfeits"] == _NO_FORFEITS
+    # Kết quả đã đo ở notebook mục 7.2: bản bật pattern thắng cả hai ván.
+    assert summary_full["wins"] == 2
+
+
+def test_broken_four_limit_when_no_followup_threat():
+    # Chuẩn bị: X có chuỗi 3 quân bị O chặn một đầu ở (5, 2), X đến lượt.
+    game = place(X, [(5, 3), (5, 4), (5, 5)], [(5, 2), (0, 0), (10, 10)], to_move=X)
+    agent = RuleBasedAgent(name=_PATTERN_NAME, use_patterns=True)
+    # Thực thi: X đi nước bốn một ô thắng, sau đó O chặn ô thắng duy nhất ở (5, 7).
+    action = agent.choose_action(game.board, X)
+    decision = agent.explain_last_action()
+    game.step(action)
+    o_action = agent.choose_action(game.board, O)
+    game.step(o_action)
+    # Kiểm chứng: tầng attack_broken_four đi (5, 6), nhưng sau khi O chặn (5, 7) thì X hết đe dọa kế tiếp.
+    assert decision.rule == RULE_ATTACK_BROKEN_FOUR
+    assert action == (5, 6)
+    assert o_action == (5, 7)
+    assert winning_moves(game.board, X) == []
+    assert not any(
+        classify_move(game.board, cell, X) in (PATTERN_FIVE, PATTERN_OPEN_FOUR)
+        for cell in candidate_actions(game.board, radius=agent.radius)
+    )
+
+
+def test_time_mode_practical_latency_well_below_limit():
+    # Chuẩn bị: cấu hình chế độ time với giới hạn 2,0 giây qua play_match.
+    factory_rule = partial(RuleBasedAgent, name=_PATTERN_NAME, use_patterns=True)
+    factory_random = partial(RandomAgent, seed=7)
+    budget = SearchBudget(mode="time", time_limit_s=2.0)
+    # Thực thi
+    record, logs = play_match(factory_rule, factory_random, agent_x=_PATTERN_NAME, agent_o="RandomAgent",
+                              budget=budget)
+    rule_logs = [entry for entry in logs if entry["player"] == X]
+    # Kiểm chứng: ván kết thúc hợp lệ, không quá giờ và độ trễ thực tế dưới 0,5 giây mỗi lượt.
+    assert record.reason == "completed"
+    assert rule_logs
+    assert all(entry["status"] == "move" and not entry["stats"].get("timed_out", False) for entry in rule_logs)
+    assert all(entry["elapsed_s"] < 0.5 for entry in rule_logs)
