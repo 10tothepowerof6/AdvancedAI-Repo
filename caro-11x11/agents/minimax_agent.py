@@ -401,6 +401,18 @@ class MinimaxSearcher:
             return terminal_score(state.result(), perspective)
         return perspective * _raw_heuristic(state.board, self.weights_for(state), state.win_length)
 
+    def manifest(self, state: SearchState, depth: int) -> dict[str, object]:
+        """Tệp kê khai của một lần tìm kiếm: cấu hình và thứ tự xét nước ở gốc.
+
+        Dùng để đối chiếu hai lần chạy (ví dụ bật/tắt Alpha-Beta) có cùng độ sâu,
+        bán kính, trọng số, tập ứng viên và thứ tự duyệt hay không; không chạy tìm kiếm.
+        """
+        depth = _validate_positive_int(depth, "Độ sâu")
+        return {"use_alpha_beta": self.use_alpha_beta, "move_ordering": self.move_ordering,
+                "radius": self.radius, "depth": depth,
+                "weights": tuple(int(w) for w in self.weights_for(state)),
+                "root_order": [action for action, _ in self.ordered_moves(state, depth)]}
+
     def _check_stop(self) -> None:
         """Dừng hợp tác: báo SearchTimeout khi should_stop() cho biết đã tới mốc dừng."""
         if self.should_stop is not None and self.should_stop():

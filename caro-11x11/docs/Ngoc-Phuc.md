@@ -381,7 +381,7 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 - [ ] Không đưa vào Git các file không liên quan, thư mục môi trường ảo (`.venv`) hoặc dữ liệu có dung lượng lớn.
 - [ ] Nhóm trưởng xác nhận kiểm thử tích hợp thành công trước khi chính thức nghiệm thu phần việc.
 
-*Trạng thái tài liệu: Giai đoạn 1 đã merge (PR #17). Giai đoạn 2 đã mở PR #20 và sửa theo review, chờ duyệt lại. Giai đoạn 3 chưa thực hiện.*
+*Trạng thái tài liệu: Giai đoạn 1 đã merge (PR #17). Giai đoạn 2 đã merge (PR #20). Giai đoạn 3 đã cài đặt và kiểm thử, chờ mở PR.*
 
 ---
 
@@ -438,7 +438,7 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 
 ## 13. Nhật ký thực hiện - Giai đoạn 2
 
-### Trạng thái: Đã mở PR #20, đã sửa theo review, chờ duyệt lại
+### Trạng thái: Đã merge (PR #20)
 
 ### Thành phần đã cài đặt (`agents/minimax_agent.py`)
 | Thành phần | Vai trò |
@@ -613,3 +613,43 @@ Stage đúng thay đổi của từng cột mốc, kiểm tra `git diff --cached
 **Notebook phần 5-6.** Chạy từ kernel mới: 10/10 ví dụ mẫu hình khớp kỳ vọng tính tay; 10/10 ca xung đột luật chọn đúng luật và nước; bản baseline khác bản đầy đủ ở 6/10 ca; đổi màu X/O cho cùng quyết định ở 10/10 ca. Output phần 1-4 giống bản Task 1, chỉ khác tên luật.
 
 **Giới hạn đã biết.** Đe dọa kép đã hình thành chỉ chặn được một ô; đối thủ có hai nhóm quân tách rời cùng tạo được bốn mở thì một lượt không chặn hết; tác tử không đọc chuỗi nước ép buộc dài hơn hai nước; tầng 3-8 bỏ qua nước cách mọi quân hơn 2 ô; tầng 7 chỉ xét các ô đối thủ cần để tạo ba mở; điểm vị trí của tầng dự phòng giữ nguyên Task 1. Chưa đo độ trễ thi đấu bằng `elapsed_s` và chưa thi đấu nhiều ván; phần này thuộc Task 3.
+
+## 15. Nhật ký thực hiện - Giai đoạn 3
+
+### Trạng thái: Đã cài đặt và kiểm thử, chờ mở PR
+
+### Thành phần bổ sung (`agents/minimax_agent.py`)
+| Thành phần | Vai trò |
+| :--- | :--- |
+| `MinimaxSearcher.manifest(state, depth)` | Tệp kê khai của một lần tìm kiếm: cờ cắt tỉa, sắp xếp, bán kính, độ sâu, trọng số và thứ tự xét nước ở gốc. Dùng để đối chiếu hai lần chạy chỉ khác cờ Alpha-Beta; không chạy tìm kiếm. |
+
+Thuật toán tìm kiếm và tác tử không thay đổi so với Giai đoạn 2.
+
+### Quyết định thiết kế thực nghiệm
+- **Tách bài đo cắt tỉa và bài đánh giá thi đấu:** Phần 7 so sánh bật/tắt Alpha-Beta ở cùng độ sâu trên cùng 6 vị trí của Phần 6; Phần 8 là thi đấu qua `play_match`, trong đó chỉ cấu hình `time` là đánh giá cùng quỹ thời gian.
+- **Mỗi phép so sánh chỉ đổi một tham số:** cặp bật/tắt cắt tỉa được xác nhận bằng tệp kê khai; mỗi cấu hình thi đấu chỉ khác cấu hình gốc "Alpha-Beta + sắp xếp, độ sâu 2" đúng một tham số.
+- **Ngân sách thay vì bỏ qua:** mọi lần tìm kiếm ở Phần 7 có cùng ngân sách 60 s (dừng hợp tác qua `should_stop`); lần vượt ngân sách sẽ được ghi rõ, không suy diễn số liệu. Thời gian đo trực tiếp bằng `perf_counter`.
+- **Đổi bên và seed cố định:** mỗi seed Random đánh hai ván, Minimax cầm X rồi cầm O; seed và cấu hình tập trung ở ô cấu hình Phần 2.
+- **Tổng hợp bằng module chung:** W/D/L, điểm và độ trễ đều qua `evaluation/metrics.py` (`summarize_results`, `summarize_latencies`); không tự viết lại logic tổng hợp.
+- **Phân tích thất bại bằng ván tự đấu:** Random không đủ mạnh để lộ thất bại, nên dùng Minimax độ sâu 2 tự đấu từ 12 khai cuộc ngẫu nhiên. Nguyên nhân được xếp loại bằng quy tắc đặt trước, mỗi bước chỉ đổi một yếu tố: tìm sâu hơn 2 ply (độ sâu), mở rộng bán kính lên 3 (tập ứng viên), heuristic ở lượt trước không báo nguy (heuristic); còn lại là độ sâu ngoài tầm kiểm chứng.
+
+### Kiểm thử bổ sung (`tests/test_minimax_agent.py`)
+- Tệp kê khai: bật/tắt Alpha-Beta chỉ khác cờ cắt tỉa ở độ sâu 1, 2, 3 và cả hai thứ tự xét; kê khai phản ánh đúng bán kính, sắp xếp, trọng số và độ sâu.
+- Ghi lại mọi nút được mở rộng: các nút Alpha-Beta mở rộng là dãy con của Minimax thuần theo đúng trình tự, cùng tập và thứ tự nước con.
+- Cấu trúc log của tác tử khi chạy qua `play_match` (đủ khóa thống kê, độ sâu đạt được, `elapsed_s >= thinking_time`), không xét thắng thua.
+- `summarize_results` và `summarize_latencies` trên dữ liệu mẫu tính tay (kể cả ván xử thua do timeout và mẫu rỗng).
+- Đã cố ý cài 4 lỗi (bật cắt tỉa làm đổi thứ tự xét, làm đổi tập ứng viên, kê khai bỏ sót bán kính, kê khai ghi sai thứ tự): cả 4 đều bị bắt.
+- Toàn bộ test của dự án: 774 pass (chạy lại sau khi rebase lên `main` đã có Task 2 Rule-based).
+
+### Notebook (`notebooks/02_minimax.ipynb`)
+- Phần 7.1: 72 lần chạy (6 vị trí × độ sâu 1-3 × 2 thứ tự × bật/tắt), không lần nào vượt ngân sách; kê khai khớp; giá trị và nước trùng 100%; độ sâu 1-2 khớp Phần 6. Số nút Minimax thuần trung bình 94 → 8 797 → 828 357; Alpha-Beta giảm 71,2% / 84,6% ở độ sâu 2 và 90,6% / 98,8% ở độ sâu 3 (không / có sắp xếp). Độ sâu 3 thuần mất khoảng 20 s mỗi vị trí, Alpha-Beta + sắp xếp dưới 1 s.
+- Phần 7.2: chế độ `time` 2,0 s hoàn tất độ sâu 3 ở 5 vị trí giữa ván và độ sâu 4 ở thế "X phải chặn".
+- Phần 8: 90 ván với Random qua `play_match` (4 cấu hình fixed × 20 ván, cấu hình time × 10 ván, đổi bên), thắng 90/90, không xử thua. Minimax thuần và Alpha-Beta cùng thứ tự đi cùng một chuỗi nước ở cả 20 ván. Nút trung bình mỗi nước ở độ sâu 2: thuần 3 353,3, Alpha-Beta không sắp xếp 973,9, có sắp xếp 300,2. Chế độ `time`: `elapsed_s` lớn nhất dưới 2,0 s, độ sâu hoàn tất trung bình khoảng 3,4.
+- Phần 9: 0 thất bại ở Phần 8. Tự đấu: 3 hòa, 9 ván có người thắng; 1 ca do độ sâu (độ sâu 4 cứu được), 8 ca do độ sâu ngoài tầm kiểm chứng (heuristic đã báo bất lợi từ -1 294 đến -168 nhưng không nhận ra đe dọa kép), 0 ca do heuristic theo quy tắc, 0 ca do tập ứng viên. Bán kính 2 và 3 cho cùng giá trị và nước ở 15/15 vị trí.
+- Phần 10: trả lời câu hỏi nghiên cứu, bảng kết luận kèm căn cứ, hạn chế, cấu hình bàn giao và hướng dẫn tái lập.
+
+### Hạn chế kỹ thuật đã biết
+- Số đo thời gian chỉ trên một máy; Minimax thuần độ sâu 3 chỉ khảo sát trên 6 vị trí vì mỗi vị trí mất khoảng 20 s.
+- Thi đấu cục bộ (20 ván mỗi cấu hình fixed, 10 ván cấu hình time) không thay thế giải đấu chính thức (tối thiểu 100 ván/cặp, nhiều seed).
+- Phân tích thất bại chỉ kiểm chứng tới 4 ply và bán kính 3; "thắng chắc" được chứng minh trong tập ứng viên bán kính 2 của bên phòng thủ.
+- Heuristic chưa nhận diện đe dọa kép; chưa có bảng chuyển vị hay tìm kiếm mở rộng cho chuỗi nước ép.

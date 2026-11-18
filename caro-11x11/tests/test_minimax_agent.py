@@ -4,6 +4,8 @@ Mỗi ca theo 3 bước Arrange / Act / Assert. Fixture được dựng bằng c
 đi hợp lệ qua CaroGame.step() để bảo đảm trạng thái có thể xảy ra trong ván thật.
 """
 
+from functools import partial
+
 import numpy as np
 import pytest
 
@@ -26,6 +28,8 @@ from agents.random_agent import RandomAgent
 from config.search_budget import SearchBudget
 from core.game_engine import CaroGame
 from core.game_utils import candidate_actions
+from evaluation.match import play_match
+from evaluation.metrics import MatchRecord, summarize_latencies, summarize_results
 
 X, O = 1, -1
 DIRECTION_STARTS = {"ngang": ((0, 1), (5, 1)), "dọc": ((1, 0), (1, 5)),
@@ -1076,3 +1080,126 @@ def test_agent_rejects_finished_game(name, mode):
         with pytest.raises(ValueError, match="kết thúc"):
             agent.choose_action(board, player)
     np.testing.assert_array_equal(board, game.board)
+
+
+# Giai đoạn 3 - Tệp kê khai, log tác tử và tổng hợp số liệu dùng chung
+
+@pytest.mark.parametrize("ordering", [False, True])
+@pytest.mark.parametrize("depth", [1, 2, 3])
+def test_manifest_same_except_alpha_beta_flag(depth, ordering):
+    # Arrange
+    state = _random_state(seed=1, n_moves=12)
+    # Act
+    plain = MinimaxSearcher(use_alpha_beta=False, move_ordering=ordering).manifest(state, depth)
+    pruned = MinimaxSearcher(use_alpha_beta=True, move_ordering=ordering).manifest(state, depth)
+    # Assert: chỉ khác cờ cắt tỉa; cùng độ sâu, bán kính, trọng số, tập ứng viên và thứ tự gốc
+    assert plain.pop("use_alpha_beta") is False and pruned.pop("use_alpha_beta") is True
+    assert plain == pruned
+    assert sorted(plain["root_order"]) == sorted(state.candidates())
+
+
+def test_manifest_reflects_configuration():
+    # Arrange
+    state = _random_state(seed=1, n_moves=12)
+    # Act
+    unordered = MinimaxSearcher(move_ordering=False).manifest(state, 2)
+    ordered = MinimaxSearcher(move_ordering=True).manifest(state, 2)
+    narrow = MinimaxSearcher(radius=1).manifest(state, 2)
+    # Assert
+    assert unordered["root_order"] == state.candidates()
+    assert ordered["root_order"] != unordered["root_order"]
+    assert sorted(ordered["root_order"]) == sorted(unordered["root_order"])
+    assert set(narrow["root_order"]) < set(unordered["root_order"]) and narrow["radius"] == 1
+    assert unordered["weights"] == WINDOW_WEIGHTS and unordered["depth"] == 2
+    with pytest.raises(ValueError):
+        MinimaxSearcher().manifest(state, 0)
+
+
+def _record_expansions(searcher):
+    """Ghi lại mọi nút được mở rộng: (bàn cờ, số ply còn lại, thứ tự nước con)."""
+    expansions = []
+    original = searcher.ordered_moves
+
+    def recorder(state, depth_left, first_action=None):
+        moves = original(state, depth_left, first_action)
+        expansions.append((state.board.tobytes(), depth_left, tuple(action for action, _ in moves)))
+        return moves
+
+    searcher.ordered_moves = recorder
+    return expansions
+
+
+@pytest.mark.parametrize("ordering", [False, True])
+@pytest.mark.parametrize("state_factory,depth,radius", [
+    (lambda: _random_state(3, 12), 2, 2),
+    (lambda: _state_after([(5, 5), (5, 6)]), 3, 1),
+])
+def test_alpha_beta_expands_subsequence_of_plain_in_same_order(state_factory, depth, radius, ordering):
+    # Arrange
+    state = state_factory()
+    plain = MinimaxSearcher(use_alpha_beta=False, move_ordering=ordering, radius=radius)
+    pruned = MinimaxSearcher(use_alpha_beta=True, move_ordering=ordering, radius=radius)
+    plain_log, pruned_log = _record_expansions(plain), _record_expansions(pruned)
+    # Act
+    plain_result = plain.search(state, depth)
+    pruned_result = pruned.search(state, depth)
+    # Assert: mỗi nút Alpha-Beta mở rộng đều có trong Minimax thuần với cùng tập và thứ tự
+    # nước con, theo đúng trình tự duyệt (dãy con); cắt tỉa chỉ bỏ bớt nút chứ không đổi thứ tự.
+    # Ở độ sâu 2 các nút bị cắt là lá (không mở rộng) nên số nút mở rộng có thể bằng nhau.
+    remaining = iter(plain_log)
+    assert all(any(entry == other for other in remaining) for entry in pruned_log)
+    assert len(pruned_log) <= len(plain_log)
+    assert pruned_result.nodes_visited < plain_result.nodes_visited
+
+
+def test_play_match_logs_minimax_stats():
+    # Arrange: runner chính thức, mỗi agent một tiến trình; Minimax cầm X ở chế độ fixed độ sâu 1
+    budget = SearchBudget(mode="fixed", depth=1)
+    # Act
+    record, logs = play_match(MinimaxAgent, partial(RandomAgent, 0),
+                              agent_x="Minimax", agent_o="Random", budget=budget)
+    # Assert: cấu trúc log của từng nước Minimax, không xét thắng thua
+    minimax_logs = [log for log in logs if log["player"] == X]
+    assert record.reason == "completed" and minimax_logs
+    for log in minimax_logs:
+        assert log["status"] == "move" and log["mode"] == "fixed"
+        stats = log["stats"]
+        assert {"thinking_time", "nodes_visited", "simulations", "pruned_nodes",
+                "depth_reached", "root_value"} <= set(stats)
+        assert stats["depth_reached"] == 1 and stats["simulations"] == 0
+        assert stats["nodes_visited"] >= 2 and stats["pruned_nodes"] == 0
+        assert log["elapsed_s"] >= stats["thinking_time"] >= 0
+    assert summarize_results([record], "Minimax")["total"] == 1
+
+
+def test_summarize_results_on_hand_computed_minimax_records():
+    # Arrange: tính tay theo góc nhìn Minimax: thắng 3, hòa 1, thua 2 (1 thua do timeout)
+    records = [MatchRecord("Minimax", "Random", 1),
+               MatchRecord("Random", "Minimax", -1),
+               MatchRecord("Minimax", "Random", 0),
+               MatchRecord("Random", "Minimax", 1),
+               MatchRecord("Random", "Minimax", 1, "timeout"),
+               MatchRecord("Minimax", "Random", 1)]
+    # Act
+    minimax = summarize_results(records, "Minimax")
+    random_side = summarize_results(records, "Random")
+    # Assert: score = (W + 0,5 × D) / N
+    assert (minimax["wins"], minimax["draws"], minimax["losses"], minimax["total"]) == (3, 1, 2, 6)
+    assert minimax["score"] == pytest.approx(3.5 / 6)
+    assert minimax["forfeits"] == {"timeout": 1, "agent_error": 0, "illegal_action": 0}
+    assert (random_side["wins"], random_side["losses"]) == (2, 3)
+    assert random_side["score"] == pytest.approx(2.5 / 6)
+    assert random_side["forfeits"] == {"timeout": 0, "agent_error": 0, "illegal_action": 0}
+    assert summarize_results([], "Minimax")["score"] is None
+
+
+def test_summarize_latencies_on_hand_computed_values():
+    # Arrange: p95 nội suy tuyến tính: vị trí 0,95 × 3 = 2,85 nằm giữa 1,5 và 2,0
+    seconds = [0.5, 1.0, 1.5, 2.0]
+    # Act
+    summary = summarize_latencies(seconds)
+    # Assert
+    assert summary["count"] == 4
+    assert summary["mean_s"] == pytest.approx(1.25)
+    assert summary["p95_s"] == pytest.approx(1.5 + 0.85 * 0.5)
+    assert summarize_latencies([]) == {"count": 0, "mean_s": None, "p95_s": None}
