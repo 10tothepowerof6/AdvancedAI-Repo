@@ -9,17 +9,22 @@ Các test dài chia ba phần: Chuẩn bị (dựng thế cờ) / Thực thi (g�
 
 from functools import partial
 from math import inf, log, sqrt
+from time import sleep
 
 import numpy as np
 import pytest
 
-from agents.mcts_agent import (DEFAULT_RADIUS, MCTSAgent, MCTSNode, MCTSState, backpropagate,
-                               best_action, outcome_value, rollout, select_child, uct_score)
+from agents.base_agent import BaseAgent
+from agents.mcts_agent import (DEFAULT_RADIUS, VARIANTS, MCTSAgent, MCTSNode, MCTSState, backpropagate,
+                               best_action, check_series_logs, outcome_value, rollout, select_child,
+                               summarize_series, tactical_candidates, tactical_rollout, uct_score,
+                               winning_cells)
 from agents.random_agent import RandomAgent
 from config.search_budget import SearchBudget
 from core.game_engine import CaroGame
 from core.game_utils import candidate_actions
 from evaluation.match import play_match
+from evaluation.metrics import MatchRecord, summarize_latencies, summarize_results
 
 # Quân đệm ở hàng 10, cách xa các chuỗi thắng.
 _FILL = [(10, 0), (10, 2), (10, 4), (10, 6), (10, 8)]
@@ -680,3 +685,322 @@ def test_play_match_runner_with_fixed_budget():
     mcts_logs = [log for log in logs if log["player"] == 1]
     assert mcts_logs and all(log["status"] == "move" for log in mcts_logs)
     assert all(log["stats"]["simulations"] == 15 for log in mcts_logs)
+
+
+# ================================================================ Giai đoạn 3: biến thể tactical, log và chỉ số
+
+# Thế cờ chiến thuật (chuỗi nước hợp lệ, đến lượt X) và các ô kỳ vọng tính tay.
+_THANG_NGAY = [(5, 2), (0, 0), (5, 3), (0, 2), (5, 4), (0, 4), (5, 5), (0, 6)]          # X bốn mở: (5,1), (5,6)
+_CHAN_BON = [(5, 0), (5, 1), (0, 0), (5, 2), (0, 2), (5, 3), (10, 10), (5, 4)]          # O bốn, đầu trái bị chặn: (5,5)
+_THANG_TRUOC_CHAN = [(3, 1), (7, 1), (3, 2), (7, 2), (3, 3), (7, 3), (3, 4), (7, 4)]   # X thắng (3,0)/(3,5); O đe dọa
+_X_GAP = [(5, 2), (0, 0), (5, 3), (0, 2), (5, 5), (0, 4), (5, 6), (0, 6)]              # X _XX_XX: ô giữa (5,4)
+_X_SIX = [(5, 1), (0, 0), (5, 2), (0, 2), (5, 3), (0, 4), (5, 5), (0, 6), (5, 6), (0, 8)]  # nối thành sáu: (5,4)
+
+
+def _oracle_wins(board, player):
+    """Kiểm tra độc lập: thử đặt quân `player` vào từng ô trống bằng MCTSState (đã đối chiếu với engine)."""
+    state = MCTSState.from_board(board, player)
+    return {a for a in state.legal_actions() if state.play(a).result() == player}
+
+
+def _random_positions(count=12, plies=40):
+    """Thế cờ giữa ván ngẫu nhiên (chưa kết thúc) dựng bằng engine, mỗi thế một seed."""
+    positions = []
+    for seed in range(count):
+        rng = np.random.default_rng(seed)
+        game = CaroGame()
+        for _ in range(plies):
+            legal = game.legal_actions()
+            nxt = legal[int(rng.integers(len(legal)))]
+            probe = game.clone()
+            probe.step(nxt)
+            if probe.is_terminal():
+                break
+            game.step(nxt)
+        positions.append(game)
+    return positions
+
+
+@pytest.mark.parametrize("moves,player,expected", [
+    (_THANG_NGAY, 1, {(5, 1), (5, 6)}),
+    (_THANG_NGAY, -1, set()),
+    (_CHAN_BON, -1, {(5, 5)}),
+    (_CHAN_BON, 1, set()),
+    (_X_GAP, 1, {(5, 4)}),
+    (_X_SIX, 1, {(5, 4)}),
+], ids=["x_bon_mo", "o_khong_co", "o_bon_bi_chan", "x_khong_co", "x_co_khoang_trong", "x_noi_thanh_sau"])
+def test_winning_cells_hand_counted(moves, player, expected):
+    board = _position(moves).board
+    before = board.copy()
+    assert winning_cells(board, player) == expected == _oracle_wins(board, player)
+    np.testing.assert_array_equal(board, before)
+
+
+@pytest.mark.parametrize("index", range(12))
+def test_winning_cells_match_oracle_on_random_positions(index):
+    board = _random_positions()[index].board
+    for player in (1, -1):
+        assert winning_cells(board, player) == _oracle_wins(board, player)
+
+
+def test_tactical_candidates_priority():
+    # Bên đến lượt có ô thắng: chỉ giữ ô thắng, kể cả khi đối thủ cũng đe dọa.
+    state = MCTSState.from_game(_position(_THANG_TRUOC_CHAN))
+    base = state.candidate_actions()
+    kept, pruned = tactical_candidates(state)
+    assert kept == [(3, 0), (3, 5)] and pruned == len(base) - 2
+    # Không có ô thắng của mình nhưng đối thủ đe dọa: chỉ giữ ô chặn.
+    state = MCTSState.from_game(_position(_CHAN_BON))
+    assert tactical_candidates(state) == ([(5, 5)], len(state.candidate_actions()) - 1)
+    # Không bên nào đe dọa: giữ nguyên ứng viên bán kính, không bỏ ô nào.
+    state = MCTSState.from_game(_position(SEQUENCES[-1][1]))
+    assert tactical_candidates(state) == (state.candidate_actions(), 0)
+    # Trạng thái kết thúc: không có ứng viên.
+    assert tactical_candidates(MCTSState.from_game(_position(SEQUENCES[0][1]))) == ([], 0)
+
+
+@pytest.mark.parametrize("moves,first", [(_THANG_NGAY, {(5, 1), (5, 6)}), (_CHAN_BON, {(5, 5)})],
+                         ids=["di_nuoc_thang", "chan_nuoc_thang_cua_doi_thu"])
+def test_tactical_rollout_first_move(moves, first):
+    state = MCTSState.from_game(_position(moves))
+    for seed in range(5):
+        trace = []
+        result = tactical_rollout(state, np.random.default_rng(seed), trace=trace)
+        assert trace[0] in first
+        if moves is _THANG_NGAY:
+            assert result == 1 and len(trace) == 1
+
+
+@pytest.mark.parametrize("seed", range(3))
+def test_tactical_rollout_follows_policy_and_engine(seed):
+    # Chuẩn bị: thế giữa ván ngẫu nhiên; lưu bản sao để kiểm tra rollout không sửa state.
+    game = _random_positions(count=3, plies=20)[seed]
+    state = MCTSState.from_game(game)
+    before = state.clone()
+    # Thực thi
+    trace = []
+    result = tactical_rollout(state, np.random.default_rng(seed), trace=trace)
+    # Kiểm chứng từng nước bằng kiểm tra độc lập: có ô thắng thì đi ô thắng; không có mà bị đe dọa thì chặn.
+    for action in trace:
+        assert not game.is_terminal()
+        mover = game.current_player
+        own, threats = _oracle_wins(game.board, mover), _oracle_wins(game.board, -mover)
+        if own:
+            assert action in own
+        elif threats:
+            assert action in threats
+        game.step(action)
+    assert game.is_terminal() and game.result() == result
+    np.testing.assert_array_equal(state.board, before.board)
+    assert (state.move_count, state.current_player) == (before.move_count, before.current_player)
+
+
+def test_tactical_rollout_terminal_and_time_stop():
+    terminal = MCTSState.from_game(_position(SEQUENCES[0][1]))
+    trace = []
+    assert tactical_rollout(terminal, np.random.default_rng(0), trace=trace) == 1 and trace == []
+    state = MCTSState.from_board(_small_board(), 1)
+    assert tactical_rollout(state, np.random.default_rng(0), stop_at=0.0, trace=trace) is None and trace == []
+
+
+def test_variant_validation_and_default():
+    assert VARIANTS == ("standard", "tactical")
+    assert MCTSAgent(seed=0).variant == "standard"
+    with pytest.raises(ValueError):
+        MCTSAgent(seed=0, variant="random")
+
+
+def test_tactical_agent_restricts_root_and_counts_pruned():
+    game = _position(_CHAN_BON)
+    agent = MCTSAgent(seed=0, budget=SearchBudget(simulations=60), variant="tactical")
+    action = agent.choose_action(game.board, game.current_player)
+    root = agent.last_root
+    assert action == (5, 5) and set(root.children) == {(5, 5)}
+    assert root.tactical and all(child.tactical for child in root.children.values())
+    # pruned_nodes = số ứng viên bị bỏ ở gốc + ở mọi nút đã tạo; gốc đã bỏ len(ứng viên) − 1 ô.
+    expected_root = len(candidate_actions(game.board, DEFAULT_RADIUS)) - 1
+    assert root.pruned == expected_root
+    created = [n for n in _all_nodes(root) if n is not root]
+    assert agent.stats["pruned_nodes"] == expected_root + sum(n.pruned for n in created)
+    assert agent.stats["nodes_visited"] == len(created) and agent.stats["simulations"] == 60
+
+
+def test_tactical_pruned_counts_nodes_below_root():
+    # O có ba mở ở hàng 5, đến lượt X: gốc không bị lọc, nhưng các nút sâu hơn (O vừa thành bốn) bị lọc.
+    game = _position([(0, 0), (5, 3), (0, 3), (5, 4), (0, 6), (5, 5)])
+    agent = MCTSAgent(seed=0, budget=SearchBudget(simulations=200), variant="tactical")
+    agent.choose_action(game.board, game.current_player)
+    created = [n for n in _all_nodes(agent.last_root) if n is not agent.last_root]
+    assert agent.last_root.pruned == 0 and sum(n.pruned for n in created) > 0
+    assert agent.stats["pruned_nodes"] == sum(n.pruned for n in created)
+
+
+def _all_nodes(node):
+    yield node
+    for child in node.children.values():
+        yield from _all_nodes(child)
+
+
+def test_standard_agent_never_prunes():
+    game = _position(_CHAN_BON)
+    agent = MCTSAgent(seed=0, budget=SearchBudget(simulations=60))
+    agent.choose_action(game.board, game.current_player)
+    assert agent.stats["pruned_nodes"] == 0
+    assert all(not n.tactical and n.pruned == 0 for n in _all_nodes(agent.last_root))
+
+
+def test_tactical_same_seed_reproducible():
+    game = _position(SEQUENCES[-1][1])
+    picks = [MCTSAgent(seed=7, budget=SearchBudget(simulations=80), variant="tactical")
+             .choose_action(game.board, game.current_player) for _ in range(2)]
+    assert picks[0] == picks[1]
+
+
+def test_tactical_trace_replays_on_engine():
+    start = SEQUENCES[-1][1]
+    records = []
+    agent = MCTSAgent(seed=3, budget=SearchBudget(simulations=30), variant="tactical")
+    agent.search(_position(start).board, _position(start).current_player, trace=records.append)
+    assert len(records) == 30
+    for record in records:
+        replay = _position(start)
+        moves = list(record["selection_path"])
+        if record["expanded"] is not None:
+            moves.append(record["expanded"])
+        for action in moves + record["rollout_moves"]:
+            replay.step(action)
+        assert replay.is_terminal() and replay.result() == record["result"]
+
+
+def test_tactical_time_mode_stops_before_deadline():
+    agent = MCTSAgent(seed=0, budget=SearchBudget(mode="time", time_limit_s=0.3), variant="tactical")
+    game = _position(SEQUENCES[-1][1])
+    agent.choose_action(game.board, game.current_player)
+    assert agent.stats["thinking_time"] < 0.3 and agent.stats["simulations"] > 0
+    assert agent.last_root.visits == agent.stats["simulations"]
+
+
+_LOG_KEYS = {"player", "ply", "mode", "limit_s", "budget", "status", "action", "stats", "elapsed_s"}
+
+
+@pytest.mark.parametrize("budget,variant", [(SearchBudget(simulations=12), "standard"),
+                                            (SearchBudget(mode="time", time_limit_s=0.3), "tactical")],
+                         ids=["fixed_standard", "time_tactical"])
+def test_play_match_log_format(budget, variant):
+    # Mỗi lượt của MCTS trong log runner có đủ trường cấu hình, nước đi, thống kê và độ trễ.
+    record, logs = play_match(partial(MCTSAgent, seed=1, variant=variant), partial(RandomAgent, seed=2),
+                              agent_x="MCTS", agent_o="Ngẫu nhiên", budget=budget)
+    assert record.reason == "completed" and record.winner in (-1, 0, 1)
+    assert [log["ply"] for log in logs] == list(range(1, len(logs) + 1))
+    mcts_logs = [log for log in logs if log["player"] == 1]
+    limit = budget.time_limit_s if budget.mode == "time" else 30.0
+    for log in mcts_logs:
+        assert set(log) == _LOG_KEYS and log["status"] == "move" and log["mode"] == budget.mode
+        assert log["limit_s"] == limit
+        assert log["budget"] == {"simulations": budget.simulations, "depth": budget.depth,
+                                 "time_limit_s": budget.time_limit_s}
+        assert set(log["stats"]) == {"thinking_time", "nodes_visited", "simulations", "pruned_nodes"}
+        assert 0 <= log["elapsed_s"] < limit
+        if budget.mode == "fixed":
+            assert log["stats"]["simulations"] == budget.simulations and log["stats"]["pruned_nodes"] == 0
+        else:
+            assert log["stats"]["simulations"] > 0
+
+
+def test_shared_metrics_on_known_records():
+    # Bốn ván đã biết kết quả theo góc nhìn MCTS: thắng (cầm X), thua (cầm O), hòa, thua do timeout (cầm O).
+    records = [MatchRecord("MCTS", "Ngẫu nhiên", 1), MatchRecord("Ngẫu nhiên", "MCTS", 1),
+               MatchRecord("MCTS", "Ngẫu nhiên", 0), MatchRecord("Ngẫu nhiên", "MCTS", 1, "timeout")]
+    summary = summarize_results(records, "MCTS")
+    assert (summary["wins"], summary["draws"], summary["losses"], summary["total"]) == (1, 1, 2, 4)
+    assert summary["score"] == pytest.approx((1 + 0.5) / 4)
+    assert summary["forfeits"] == {"timeout": 1, "agent_error": 0, "illegal_action": 0}
+    latency = summarize_latencies([0.1, 0.2, 0.3, 0.4, 0.5])
+    assert latency["count"] == 5 and latency["mean_s"] == pytest.approx(0.3)
+    assert latency["p95_s"] == pytest.approx(0.48)   # nội suy tuyến tính: 0,4 + 0,8 × 0,1
+
+
+# ---------------------------------------------------------------------------
+# Tổng hợp log runner khi có lượt timeout / lỗi (summarize_series, check_series_logs)
+# ---------------------------------------------------------------------------
+
+class SleepyAgent(BaseAgent):
+    """Agent luôn quá giờ: dùng để tạo ván xử thua do timeout thật qua runner."""
+
+    def __init__(self):
+        super().__init__("Chậm")
+
+    def get_action(self, board, player):
+        sleep(10)
+        return (0, 0)
+
+
+def _turn(ply, status, elapsed, simulations=None, mode="fixed", limit=30.0):
+    # Một dòng log giống runner: chỉ lượt "move" có action và stats.
+    entry = {"player": 1, "ply": ply, "mode": mode, "limit_s": limit,
+             "budget": {"simulations": 100, "depth": 3, "time_limit_s": 2.0},
+             "status": status, "elapsed_s": elapsed}
+    if status == "move":
+        entry.update(action=(5, 5), stats={"simulations": simulations})
+    else:
+        entry["error"] = "thử nghiệm"
+    return entry
+
+
+def test_summarize_series_all_games_timeout_on_first_turn():
+    # Hai ván, MCTS quá giờ ngay lượt đầu của mình (cầm X ở nước 1, cầm O ở nước 2): không có lượt "move".
+    records = [MatchRecord("MCTS", "Ngẫu nhiên", -1, "timeout"), MatchRecord("Ngẫu nhiên", "MCTS", 1, "timeout")]
+    logs = [_turn(1, "timeout", 2.05, mode="time", limit=2.0), _turn(2, "timeout", 2.03, mode="time", limit=2.0)]
+    summary = summarize_series(records, logs, "MCTS")
+    assert (summary["games"], summary["wins"], summary["draws"], summary["losses"]) == (2, 0, 0, 2)
+    assert summary["score"] == 0.0 and summary["forfeits"] == 2
+    assert summary["forfeit_reasons"] == {"timeout": 2, "agent_error": 0, "illegal_action": 0}
+    assert summary["moves"] == 0 and summary["failed_turns"] == {"timeout": 2}
+    for key in ("latency_mean_s", "latency_p95_s", "simulations_mean", "simulations_min", "simulations_max"):
+        assert summary[key] is None
+    check_series_logs(logs, SearchBudget(mode="time", time_limit_s=2.0))   # không đòi stats ở lượt timeout
+
+
+def test_summarize_series_mixed_moves_and_failures():
+    # Độ trễ và mô phỏng chỉ lấy từ lượt "move"; lượt lỗi (độ trễ 9,0 s) không được tính vào độ trễ.
+    records = [MatchRecord("MCTS", "Ngẫu nhiên", 1), MatchRecord("Ngẫu nhiên", "MCTS", 1, "agent_error")]
+    logs = [_turn(1, "move", 0.2, 100), _turn(3, "move", 0.4, 100), _turn(2, "agent_error", 9.0)]
+    summary = summarize_series(records, logs, "MCTS")
+    assert (summary["wins"], summary["losses"], summary["forfeits"]) == (1, 1, 1)
+    assert summary["moves"] == 2 and summary["failed_turns"] == {"agent_error": 1}
+    assert summary["latency_mean_s"] == pytest.approx(0.3)
+    assert summary["latency_p95_s"] == pytest.approx(0.39)   # 0,2 + 0,95 × 0,2
+    assert (summary["simulations_mean"], summary["simulations_min"], summary["simulations_max"]) == (100.0, 100, 100)
+    check_series_logs(logs, SearchBudget(simulations=100))
+
+
+def test_check_series_logs_rejects_bad_entries():
+    budget = SearchBudget(simulations=100)
+    with pytest.raises(ValueError, match="số mô phỏng"):
+        check_series_logs([_turn(1, "move", 0.2, 99)], budget)
+    with pytest.raises(ValueError, match="chế độ"):
+        check_series_logs([_turn(1, "timeout", 2.0, mode="time", limit=2.0)], budget)
+    with pytest.raises(ValueError, match="status"):
+        check_series_logs([_turn(1, "unknown", 0.1)], budget)
+    check_series_logs([], budget)
+
+
+def test_series_tools_on_real_runner_timeouts():
+    # Ván thật qua play_match: agent "Chậm" quá giờ ngay lượt đầu ở cả hai bên; log timeout không có stats.
+    budget = SearchBudget(simulations=12)
+    records, slow_logs, mcts_logs = [], [], []
+    for slow_side in (1, -1):
+        fx, fo = (SleepyAgent, partial(MCTSAgent, seed=1)) if slow_side == 1 else (partial(MCTSAgent, seed=1), SleepyAgent)
+        names = ("Chậm", "MCTS") if slow_side == 1 else ("MCTS", "Chậm")
+        record, logs = play_match(fx, fo, agent_x=names[0], agent_o=names[1], budget=budget, safety_timeout_s=0.5)
+        records.append(record)
+        slow_logs += [log for log in logs if log["player"] == slow_side]
+        mcts_logs += [log for log in logs if log["player"] == -slow_side]
+    assert [r.reason for r in records] == ["timeout", "timeout"]
+    assert all("stats" not in log for log in slow_logs)
+    slow = summarize_series(records, slow_logs, "Chậm")
+    assert (slow["losses"], slow["forfeits"], slow["moves"]) == (2, 2, 0)
+    assert slow["failed_turns"] == {"timeout": 2} and slow["latency_mean_s"] is None
+    mcts = summarize_series(records, mcts_logs, "MCTS")
+    assert (mcts["wins"], mcts["forfeits"], mcts["moves"], mcts["simulations_min"]) == (2, 0, 1, 12)
+    check_series_logs(slow_logs + mcts_logs, budget, safety_timeout_s=0.5)

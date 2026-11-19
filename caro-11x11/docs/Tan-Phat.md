@@ -314,13 +314,102 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 
 ## 11. Checklist bàn giao cuối cùng
 
-- [ ] Thuật toán triển khai đúng phạm vi phân công, tuân thủ nghiêm ngặt API chung và không sửa đổi mảng `board` gốc.
-- [ ] Bộ unit test riêng bao phủ đầy đủ các thành phần; toàn bộ test chung của dự án vẫn vượt qua thành công.
-- [ ] File notebook hoàn thiện đầy đủ 10 mục, có thể chạy trơn tru từ kernel mới; số liệu có cấu hình và seed rõ ràng.
-- [ ] Thông điệp commit, nội dung mô tả PR, chú thích code và đầu ra hiển thị đều sử dụng tiếng Việt chuẩn.
-- [ ] Mỗi giai đoạn được tổ chức trên một nhánh và PR riêng; giai đoạn trước đã được merge hoàn tất trước khi bắt đầu giai đoạn sau.
-- [ ] PR cung cấp đầy đủ tài liệu tham khảo, các hạn chế kỹ thuật và số liệu kiểm chứng thực tế.
-- [ ] Không đưa vào Git các file không liên quan, thư mục môi trường ảo (`.venv`) hoặc dữ liệu có dung lượng lớn.
+- [x] Thuật toán triển khai đúng phạm vi phân công, tuân thủ nghiêm ngặt API chung và không sửa đổi mảng `board` gốc.
+- [x] Bộ unit test riêng bao phủ đầy đủ các thành phần; toàn bộ test chung của dự án vẫn vượt qua thành công.
+- [x] File notebook hoàn thiện đầy đủ 10 mục, có thể chạy trơn tru từ kernel mới; số liệu có cấu hình và seed rõ ràng.
+- [x] Thông điệp commit, nội dung mô tả PR, chú thích code và đầu ra hiển thị đều sử dụng tiếng Việt chuẩn.
+- [x] Mỗi giai đoạn được tổ chức trên một nhánh và PR riêng; giai đoạn trước đã được merge hoàn tất trước khi bắt đầu giai đoạn sau.
+- [x] PR cung cấp đầy đủ tài liệu tham khảo, các hạn chế kỹ thuật và số liệu kiểm chứng thực tế.
+- [x] Không đưa vào Git các file không liên quan, thư mục môi trường ảo (`.venv`) hoặc dữ liệu có dung lượng lớn.
 - [ ] Nhóm trưởng xác nhận kiểm thử tích hợp thành công trước khi chính thức nghiệm thu phần việc.
 
-*Trạng thái tài liệu. Task 1 và Task 2 đã chuyển người phụ trách. Task 3 chờ phiên bản đã tích hợp để bắt đầu đánh giá.*
+---
+
+## 12. Báo cáo kết quả thực nghiệm Giai đoạn 3 (Task 3 — Đánh giá tác dụng mẫu hình & Bàn giao)
+
+### 12.1. Cấu hình đánh giá thực nghiệm
+Thiết lập hai cấu hình tác tử đối chứng độc lập nhằm cô lập và đo lường chính xác đóng góp của các tầng nhận diện mẫu hình:
+
+| Tham số cấu hình | Biến thể đầy đủ (Full Pattern) | Biến thể cơ sở (No Pattern / Baseline) | Ghi chú kỹ thuật |
+| :--- | :--- | :--- | :--- |
+| **Tên tác tử** | `Rule-based (Pattern)` | `Rule-based (Baseline)` | Phân biệt trên log thi đấu |
+| **Cờ mẫu hình (`use_patterns`)** | `True` | `False` | Biến khảo sát duy nhất |
+| **Số tầng luật hoạt động** | 8 tầng | 3 tầng (`win_now`, `block_urgent`, `positional_fallback`) | Baseline giữ nguyên cấu hình Giai đoạn 1 |
+| **Bán kính ứng viên (`radius`)** | 2 | 2 | Áp dụng cho các tầng duyệt ứng viên |
+| **Độ dài chuỗi thắng (`win_length`)** | 5 | 5 | Quy chuẩn bàn cờ Caro 11×11 |
+| **Biên thời gian an toàn (`time_margin_s`)** | 0,1 giây | 0,1 giây | Dừng tìm kiếm tại 1,9 giây trên hạn mức 2,0 giây |
+| **Khóa phá hòa (`rank_key`)** | Điểm vị trí → Gần tâm → Hàng → Cột | Điểm vị trí → Gần tâm → Hàng → Cột | Đảm bảo tính tất định |
+| **Danh sách hạt giống (`seeds`)** | Fixed: `0..9` (20 ván) / Time: `0..4` (10 ván) | Fixed: `0..9` (20 ván) / Time: `0..4` (10 ván) | Cùng danh sách seed đổi bên X/O |
+
+---
+
+### 12.2. Bảng tổng hợp kết quả thực nghiệm thực tế
+
+#### A. Đánh giá tác dụng thành phần (Thực nghiệm loại trừ trên 21 thế cờ chiến thuật)
+Thực nghiệm tổng hợp 11 thế cờ cơ bản (Mục 3) và 10 thế cờ xung đột chiến thuật (Mục 6) trong `notebooks/01_rule_based.ipynb`. Đánh giá gồm hai chỉ số: chất lượng nước đi xét trên tập nước chấp nhận được và tỷ lệ kích hoạt đúng tầng luật kỳ vọng ở 10 thế Mục 6:
+
+| Chỉ số đo lường | Full Pattern (`use_patterns=True`) | No Pattern (`use_patterns=False`) | Đánh giá & So sánh |
+| :--- | :--- | :--- | :--- |
+| **Tổng số thế cờ thử nghiệm** | 21 (Mục 3: 11, Mục 6: 10) | 21 (Mục 3: 11, Mục 6: 10) | Bộ thế cờ chuẩn hóa |
+| **Nước đi đúng tập kỳ vọng (trên 21)** | **21/21 (100,0%)** | 15/21 (71,4%) | Tăng +28,6% (+6 thế cờ) |
+| **Nước đi đúng tập kỳ vọng ở Mục 3 / Mục 6** | **11/11** và **10/10** | **11/11** và 4/10 | Baseline chọn nước ngoài tập kỳ vọng ở 6/10 thế Mục 6 |
+| **Đúng tên luật kỳ vọng ở Mục 6 (trên 10)** | **10/10 (100,0%)** | 4/10 (40,0%) | Baseline chỉ khớp các thế thắng, chặn khẩn cấp và dự phòng |
+| **Số nước thử trung bình (`nodes_visited`)** | 495,5 nước | 205,0 nước | Tăng do duyệt qua 8 tầng luật |
+| **Thời gian tính toán trung bình (`thinking_time`)** | 15,14 ms | 1,84 ms | Nằm trong ngưỡng an toàn |
+| **Phân bố tầng luật kích hoạt** | `positional_fallback`: 3, `win_now`: 6, `block_urgent`: 5, `block_open_four`: 3, `attack_open_four`: 1, `attack_broken_four`: 1, `attack_open_three`: 1, `block_open_three`: 1 | `positional_fallback`: 10, `win_now`: 6, `block_urgent`: 5 | Baseline rơi về nước vị trí ở mọi thế mẫu hình trung cuộc |
+
+6 thế cờ có sự phân hóa nước đi giữa hai cấu hình (Mục 6):
+1. **Bốn mở của mình trước chặn bốn mở:** Pattern kích hoạt `attack_open_four` đi (5, 6) để chủ động tạo hai ô thắng độc lập; Baseline rơi về `positional_fallback` đi (4, 4).
+2. **Chặn bốn mở trước bốn một ô thắng:** Pattern kích hoạt `block_open_four` đi (4, 8) để ngăn chặn đối thủ tạo đe dọa kép; Baseline rơi về `positional_fallback` đi (4, 4).
+3. **Bốn một ô thắng trước ba mở:** Pattern kích hoạt `attack_broken_four` đi (5, 6) để tạo chuỗi bốn quân buộc đối thủ chặn; Baseline rơi về `positional_fallback` đi (4, 4).
+4. **Ba mở của mình trước chặn ba mở:** Pattern kích hoạt `attack_open_three` đi (5, 6) để mở đường tạo bốn mở hai đầu; Baseline rơi về `positional_fallback` đi (4, 5).
+5. **Chỉ đối thủ có ba mở:** Pattern kích hoạt `block_open_three` đi (5, 6) để hóa giải nguy cơ ba mở của đối thủ; Baseline rơi về `positional_fallback` đi (4, 5).
+6. **Phòng thủ nhiều hướng (thế hồi quy):** Pattern kích hoạt `block_open_four` đi (0, 0) giảm thiểu số nước tạo đe dọa kép; Baseline rơi về `positional_fallback` đi (8, 9).
+
+#### B. Đối đầu trực tiếp giữa hai biến thể (2 ván đổi bên)
+Vì hai cấu hình hoàn toàn tất định nên một cặp hai ván đổi bên phản ánh trọn vẹn quỹ đạo thi đấu:
+
+| Ván đấu | Bên cầm X (Đi trước) | Bên cầm O (Đi sau) | Kết quả | Số nước kết thúc | Bước ngoặt quyết định |
+| :---: | :--- | :--- | :---: | :---: | :--- |
+| **Ván 1** | `Rule-based (Pattern)` | `Rule-based (Baseline)` | **Pattern thắng (1 - 0)** | 9 nước | Nước 5 X tạo ba mở (5, 6); Baseline không nhận diện được ba mở nên đi nước vị trí; nước 7 X nâng cấp lên bốn mở hai đầu tại (5, 3) và thắng ở nước 9. |
+| **Ván 2** | `Rule-based (Baseline)` | `Rule-based (Pattern)` | **Pattern thắng (0 - 1)** | 10 nước | Nước 4 O chặn ba mở của X tại (5, 6) dập tắt nguy cơ tấn công; nước 6 O chủ động tạo ba mở (3, 4), nước 8 tạo bốn mở (6, 7) và thắng ở nước 10. |
+
+*Tổng kết đối đầu:* Full Pattern thắng **2/2 ván (100,0%)**, điểm số 1,0, không có ván nào bị xử thua.
+
+#### C. Thi đấu thử nghiệm với `RandomAgent` (khớp số liệu Mục 8 Notebook & tệp `results/rule_based_random_benchmark.json`)
+Toàn bộ biên bản và `logs` từng nước đi của 60 ván đấu được lưu vào tệp `results/rule_based_random_benchmark.json` và trực tiếp tổng hợp qua `summarize_results` và `summarize_latencies`:
+
+| Cấu hình tác tử | Chế độ ngân sách | Số ván đấu | Thắng / Hòa / Thua | Tỷ lệ thắng (Score) | Lỗi xử thua (Forfeits) | Độ dài ván tb | Độ trễ tb (`mean_s`) | Độ trễ p95 (`p95_s`) | Thời gian tính tb |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Rule-based (Pattern)** | `fixed` | 20 | 20 / 0 / 0 | **100,0%** | 0 | **9,6 nước** | 22,67 ms | 59,03 ms | 22,14 ms |
+| **Rule-based (Baseline)** | `fixed` | 20 | 20 / 0 / 0 | **100,0%** | 0 | 18,6 nước | 1,87 ms | 2,85 ms | 1,50 ms |
+| **Rule-based (Pattern)** | `time` (2,0 giây) | 10 | 10 / 0 / 0 | **100,0%** | 0 | **9,5 nước** | 21,04 ms | 57,80 ms | 20,53 ms |
+| **Rule-based (Baseline)** | `time` (2,0 giây) | 10 | 10 / 0 / 0 | **100,0%** | 0 | 19,1 nước | 1,79 ms | 2,63 ms | 1,49 ms |
+
+*Nhận xét:*
+- Biến thể Pattern đạt độ dài ván trung bình 9,5–9,6 nước, kết thúc ván sớm hơn gần một nửa số nước so với Baseline (18,6–19,1 nước) nhờ các tầng nhận diện ba mở và bốn mở chủ động tạo đe dọa liên tiếp.
+- Trên máy thử nghiệm, thời gian tính toán trung bình của Pattern từ 20,5 đến 22,1 ms mỗi nước, giá trị phân vị p95 dưới 60 ms (độ trễ thực tế mỗi lượt đều dưới 0,5 giây), thấp hơn mốc dừng hợp tác 1,9 giây trên tổng ngân sách 2,0 giây của hệ thống.
+
+---
+
+### 12.3. Tổng hợp các giới hạn kỹ thuật quan sát qua thực nghiệm
+1. **Tầng `block_urgent` — Đe dọa kép đã hình thành (bốn mở hai đầu):**
+   Khi đối thủ đã tạo được chuỗi bốn quân mở hai đầu (`. O O O O .`), đối thủ sở hữu đồng thời hai ô thắng độc lập. Vì luật cờ chỉ cho phép đặt một quân mỗi lượt, tác tử chỉ có thể chặn được một đầu, đối thủ sẽ thắng ở đầu còn lại. Cách phòng thủ hiệu quả duy nhất là phát hiện và chặn từ sớm ở các tầng ba mở (`block_open_three`) hoặc bốn mở (`block_open_four`) trước khi đe dọa kép xuất hiện.
+2. **Tầng `block_open_four` — Đe dọa kép từ hai hướng ba mở tách rời:**
+   Khi đối thủ sở hữu hai hướng ba mở độc lập ở hai khu vực cách xa nhau trên bàn cờ, mỗi hướng đều có tiềm năng tạo bốn mở hai đầu. Do tác tử chỉ đánh giá phản xạ tham lam một bước và mỗi lượt chỉ đi một nước, tác tử chỉ chặn được một hướng, hướng còn lại đối thủ vẫn tạo được bốn mở và giành chiến thắng. Tình huống này đòi hỏi thuật toán tìm kiếm cây nhiều bước (như Minimax hoặc MCTS) để phát hiện và ngăn chặn từ các nước trước đó.
+3. **Tầng `attack_broken_four` và `positional_fallback` — Bán kính ứng viên và thiếu tầm nhìn phối hợp:**
+   - Tầng `attack_broken_four` tạo ra nước bốn một ô thắng nhằm ép đối thủ chặn, nhưng nếu đối thủ chặn thành công và ta không còn nước nối tiếp tạo đe dọa kép thì thế công bị triệt tiêu hoàn toàn (hết ô thắng dự trữ).
+   - Việc giới hạn không gian ứng viên trong bán kính `radius=2` quanh các quân cờ hiện có giúp kiểm soát thời gian phản hồi ở mức khoảng 20–22 ms, nhưng có thể bỏ qua các vị trí chiến lược ở khoảng cách xa trong giai đoạn đầu ván cờ.
+
+---
+
+### 12.4. Kết luận bàn giao Giai đoạn 3
+- **Cấu hình chính thức:** `RuleBasedAgent(use_patterns=True, radius=2, time_margin_s=0.1)`.
+- **Lệnh tái lập kiểm thử và thực nghiệm:**
+  - Chạy kiểm thử tự động: `.\.venv\Scripts\python.exe -m pytest tests -v`
+  - Thực thi lại notebook từ đầu: `.\.venv\Scripts\python.exe -m jupyter nbconvert --to notebook --execute --inplace notebooks/01_rule_based.ipynb`
+- **Độ tin cậy kiểm thử:**
+  - Bộ kiểm thử riêng `tests/test_rule_based_agent.py`: **274/274 PASSED** (100%).
+  - Toàn bộ test suite dự án: **775/775 PASSED** (100%).
+  - File notebook `notebooks/01_rule_based.ipynb`: Hoàn thiện 10/10 mục, thực thi tuần tự từ kernel mới không lỗi, lưu trữ đầy đủ bảng số liệu và đồ thị thực tế.
+
