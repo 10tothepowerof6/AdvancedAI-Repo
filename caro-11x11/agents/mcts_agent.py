@@ -26,14 +26,27 @@ Bốn bước của một mô phỏng (Giai đoạn 2), mỗi bước là một 
    lấy thẳng kết quả, không chạy rollout. Hết thời gian giữa chừng thì trả None: mô phỏng bị bỏ.
 4. Cập nhật ngược — backpropagate(): cộng N += 1 và Q += outcome_value(kết quả, player_just_moved)
    cho mọi nút trên đường đi, từ nút mới lên gốc.
+
+Biến thể (Giai đoạn 3), chọn bằng tham số `variant` của MCTSAgent:
+- "standard" (bản chuẩn, mặc định): như mô tả ở trên.
+- "tactical": thêm luật chiến thuật một nước ở hai chỗ, còn lại (lựa chọn UCT, cập nhật ngược,
+  quyết định cuối, ngân sách, bán kính) dùng chung với bản chuẩn:
+  (a) ứng viên của mỗi nút: nếu bên đến lượt có ô thắng ngay thì chỉ giữ các ô đó; nếu không mà đối thủ
+      có ô thắng ngay thì chỉ giữ các ô chặn; ngược lại giữ ứng viên bán kính như bản chuẩn
+      (kỹ thuật "decisive / anti-decisive moves"; số ứng viên bị bỏ được đếm vào `pruned_nodes`);
+  (b) rollout: cùng luật trên ở mỗi nước, còn lại đi ngẫu nhiên như bản chuẩn (tactical_rollout()).
+
+Hỗ trợ đánh giá (Giai đoạn 3): summarize_series() và check_series_logs() đọc log lượt của runner
+play_match. Chỉ lượt có status "move" mang stats; lượt timeout / lỗi được đếm riêng.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from math import inf, isfinite, log, sqrt
 from numbers import Integral, Real
 from time import perf_counter
-from typing import Callable
+from typing import Callable, Iterable, Mapping
 
 import numpy as np
 
@@ -42,6 +55,7 @@ from config.game_config import EMPTY, PLAYER_O, PLAYER_X, WIN_LENGTH
 from config.search_budget import SearchBudget
 from core.game_engine import Action, CaroGame
 from core.game_utils import candidate_actions
+from evaluation.metrics import MatchRecord, summarize_latencies, summarize_results
 
 # Bán kính ứng viên mặc định, trùng với candidate_actions của dự án.
 DEFAULT_RADIUS = 2
@@ -54,6 +68,8 @@ DEFAULT_TIME_MARGIN_S = 0.1
 _CLOCK_CHECK_EVERY = 8
 
 _DIRECTIONS = CaroGame.DIRECTIONS
+
+VARIANTS = ("standard", "tactical")
 
 
 def outcome_value(result: int, player: int) -> float:
@@ -204,6 +220,36 @@ class MCTSState:
         return False
 
 
+def winning_cells(board: np.ndarray, player: int, win_length: int = WIN_LENGTH) -> set[Action]:
+    """Các ô trống mà `player` đặt vào sẽ thắng ngay; không sửa `board`.
+
+    Mỗi ô thắng nằm cùng đoạn `win_length` ô với các quân của `player`, nên chỉ xét quanh từng quân đã có.
+    """
+    grid = board.tolist()
+    size = board.shape[0]
+    found: set[Action] = set()
+    for r, c in np.argwhere(board == player):
+        found.update(_new_winning_cells(grid, size, win_length, int(r), int(c), int(player)))
+    return found
+
+
+def tactical_candidates(state: "MCTSState", radius: int = DEFAULT_RADIUS) -> tuple[list[Action], int]:
+    """Ứng viên của biến thể tactical và số ứng viên bán kính bị bỏ.
+
+    Bên đến lượt có ô thắng ngay → chỉ các ô đó; nếu không mà đối thủ có ô thắng ngay → chỉ các ô chặn;
+    ngược lại → ứng viên bán kính như bản chuẩn. Ô thắng luôn kề quân đã có nên nằm trong tập bán kính.
+    """
+    base = state.candidate_actions(radius)
+    if not base:
+        return base, 0
+    for side in (state.current_player, -state.current_player):
+        cells = winning_cells(state.board, side, state.win_length)
+        if cells:
+            kept = sorted(cells)
+            return kept, len(base) - len(kept)
+    return base, 0
+
+
 class MCTSNode:
     """Nút cây MCTS; chỉ giữ dữ liệu tìm kiếm, luật cờ nằm trong MCTSState.
 
@@ -213,13 +259,14 @@ class MCTSNode:
     - `visits` (N) và `value` (Q) khởi tạo bằng 0; Q tính theo góc nhìn
       `player_just_moved`, xem outcome_value().
     - `untried_actions`: ứng viên bán kính `radius` chưa mở rộng; rỗng nếu terminal.
+      Với `tactical=True`, ứng viên được lọc bởi tactical_candidates(); `pruned` là số ứng viên bị bỏ.
     """
 
-    __slots__ = ("state", "parent", "action", "player_just_moved", "radius",
+    __slots__ = ("state", "parent", "action", "player_just_moved", "radius", "tactical", "pruned",
                  "children", "untried_actions", "visits", "value")
 
     def __init__(self, state: MCTSState, parent: "MCTSNode | None" = None,
-                 action: Action | None = None, radius: int = DEFAULT_RADIUS):
+                 action: Action | None = None, radius: int = DEFAULT_RADIUS, tactical: bool = False):
         if (parent is None) != (action is None):
             raise ValueError("Nút gốc không có cha và hành động; nút con phải có cả hai")
         self.state = state
@@ -233,15 +280,20 @@ class MCTSNode:
         else:
             self.player_just_moved = -state.current_player
         self.radius = radius
+        self.tactical = tactical
         self.children: dict[Action, MCTSNode] = {}
-        self.untried_actions: list[Action] = state.candidate_actions(radius)
+        if tactical:
+            self.untried_actions, self.pruned = tactical_candidates(state, radius)
+        else:
+            self.untried_actions, self.pruned = state.candidate_actions(radius), 0
         self.visits = 0
         self.value = 0.0
 
     @classmethod
-    def root(cls, board: np.ndarray, player: int, radius: int = DEFAULT_RADIUS) -> "MCTSNode":
+    def root(cls, board: np.ndarray, player: int, radius: int = DEFAULT_RADIUS,
+             tactical: bool = False) -> "MCTSNode":
         """Tạo gốc từ đầu vào của agent; bàn cờ được sao chép."""
-        return cls(MCTSState.from_board(board, player), radius=radius)
+        return cls(MCTSState.from_board(board, player), radius=radius, tactical=tactical)
 
     def is_terminal(self) -> bool:
         return self.state.is_terminal()
@@ -266,7 +318,7 @@ class MCTSNode:
         # play() kiểm tra kiểu tọa độ và báo lỗi trước khi có bất kỳ thay đổi nào.
         child_state = self.state.play(action)
         key = child_state.last_action  # tọa độ đã chuẩn hóa về (int, int)
-        child = MCTSNode(child_state, parent=self, action=key, radius=self.radius)
+        child = MCTSNode(child_state, parent=self, action=key, radius=self.radius, tactical=self.tactical)
         self.untried_actions.remove(key)
         self.children[key] = child
         return child
@@ -344,6 +396,83 @@ def rollout(state: MCTSState, rng: np.random.Generator, stop_at: float | None = 
     return 0
 
 
+def _new_winning_cells(board: list[list[int]], size: int, win_length: int, row: int, col: int,
+                       player: int) -> list[Action]:
+    """Các ô trống mà `player` đặt vào sẽ thắng ngay, xuất hiện nhờ quân vừa đặt ở (row, col).
+
+    Chỉ cần xét 4 đường qua (row, col): một ô thắng mới phải nằm cùng đoạn `win_length` ô với quân vừa đặt.
+    Lọc nhanh: trên đoạn 2·(win_length − 1) + 1 ô quanh quân vừa đặt phải có ít nhất win_length − 1 quân
+    của `player`; nếu không, hướng đó không thể sinh ô thắng mới.
+    """
+    reach = win_length - 1
+    found = []
+    for dr, dc in _DIRECTIONS:
+        cells = [(row + k * dr, col + k * dc) for k in range(-reach, reach + 1)]
+        cells = [(r, c) for r, c in cells if 0 <= r < size and 0 <= c < size]
+        if sum(board[r][c] == player for r, c in cells) < win_length - 1:
+            continue
+        for r, c in cells:
+            if board[r][c] != EMPTY:
+                continue
+            count = 1
+            for sign in (-1, 1):
+                rr, cc = r + sign * dr, c + sign * dc
+                while 0 <= rr < size and 0 <= cc < size and board[rr][cc] == player:
+                    count += 1
+                    rr, cc = rr + sign * dr, cc + sign * dc
+            if count >= win_length:
+                found.append((r, c))
+    return found
+
+
+def tactical_rollout(state: MCTSState, rng: np.random.Generator, stop_at: float | None = None,
+                     trace: list[Action] | None = None) -> int | None:
+    """Biến thể "tactical" của bước mô phỏng; cùng hợp đồng với rollout().
+
+    Ở mỗi nước: bên đang đi có ô thắng ngay thì đi ô đó; nếu không mà đối thủ có ô thắng ngay thì chặn;
+    còn lại đi ô trống kế tiếp trong một hoán vị ngẫu nhiên (giống rollout()). Ô thắng ngay của hai bên
+    được tính dần sau mỗi nước (_new_winning_cells), không quét lại toàn bàn.
+    """
+    if state.is_terminal():
+        return state.result()
+    board = state.board.tolist()
+    size, win_length = state.size, state.win_length
+    empties = [(int(r), int(c)) for r, c in np.argwhere(state.board == EMPTY)]
+    order = [empties[i] for i in rng.permutation(len(empties))]
+    # Ô thắng có sẵn: mỗi ô thắng nằm cùng đoạn win_length ô với các quân của bên đó, nên chỉ cần
+    # xét quanh từng quân đã có (ít hơn nhiều so với quét mọi ô trống).
+    wins: dict[int, set[Action]] = {PLAYER_X: set(), PLAYER_O: set()}
+    for r, c in np.argwhere(state.board != EMPTY):
+        p = board[r][c]
+        wins[p].update(_new_winning_cells(board, size, win_length, int(r), int(c), p))
+    player = state.current_player
+    cursor = 0
+    for index in range(len(empties)):
+        if stop_at is not None and index % _CLOCK_CHECK_EVERY == 0 and perf_counter() >= stop_at:
+            return None
+        if wins[player]:
+            row, col = min(wins[player])
+        elif wins[-player]:
+            row, col = min(wins[-player])
+        else:
+            while board[order[cursor][0]][order[cursor][1]] != EMPTY:
+                cursor += 1
+            row, col = order[cursor]
+        board[row][col] = player
+        wins[PLAYER_X].discard((row, col))
+        wins[PLAYER_O].discard((row, col))
+        if trace is not None:
+            trace.append((row, col))
+        if _line_wins(board, size, win_length, row, col, player):
+            return player
+        wins[player].update(_new_winning_cells(board, size, win_length, row, col, player))
+        player = -player
+    return 0
+
+
+_ROLLOUTS = {"standard": rollout, "tactical": tactical_rollout}
+
+
 def backpropagate(node: MCTSNode | None, result: int) -> None:
     """Bước cập nhật ngược: từ `node` lên gốc, N += 1 và Q += giá trị theo góc nhìn từng nút."""
     while node is not None:
@@ -381,12 +510,17 @@ class MCTSAgent(BaseAgent):
     - Cây được dựng mới ở mỗi lượt (không tái sử dụng giữa các nước).
     - Thống kê mỗi lượt: `simulations` = mô phỏng hoàn thành; `nodes_visited` = số nút mới tạo
       (không tính gốc); `pruned_nodes` = 0.
+    - `variant`: "standard" (bản chuẩn, mặc định) hoặc "tactical" (biến thể Giai đoạn 3, xem đầu module);
+      với "tactical", `pruned_nodes` = tổng số ứng viên bán kính bị luật chiến thuật bỏ ở các nút đã tạo (kể cả gốc).
     """
 
     def __init__(self, seed: int | None = None, *, budget: SearchBudget | None = None,
                  exploration: float = DEFAULT_EXPLORATION, radius: int = DEFAULT_RADIUS,
-                 time_margin_s: float = DEFAULT_TIME_MARGIN_S, name: str = "MCTS"):
+                 time_margin_s: float = DEFAULT_TIME_MARGIN_S, name: str = "MCTS",
+                 variant: str = "standard"):
         super().__init__(name, budget=budget)
+        if variant not in VARIANTS:
+            raise ValueError(f"Biến thể phải thuộc {VARIANTS}")
         if (isinstance(exploration, bool) or not isinstance(exploration, Real)
                 or not isfinite(exploration) or exploration < 0):
             raise ValueError("Hệ số khám phá phải là số thực hữu hạn không âm")
@@ -398,6 +532,7 @@ class MCTSAgent(BaseAgent):
         self.exploration = float(exploration)
         self.radius = int(radius)
         self.time_margin_s = float(time_margin_s)
+        self.variant = variant
         self.rng = np.random.default_rng(seed)
         self.last_root: MCTSNode | None = None
 
@@ -433,12 +568,13 @@ class MCTSAgent(BaseAgent):
         if not isinstance(self.budget, SearchBudget):
             raise ValueError("Ngân sách phải là SearchBudget")
         stop_at = self._stop_at(deadline)
-        root = MCTSNode.root(board, player, radius=self.radius)
+        root = MCTSNode.root(board, player, radius=self.radius, tactical=self.variant == "tactical")
         if root.is_terminal():
             raise ValueError("Không tìm nước đi cho trạng thái đã kết thúc")
         fallback = root.untried_actions[int(self.rng.integers(len(root.untried_actions)))]
         fixed = self.budget.mode == "fixed"
         completed = created = 0
+        pruned = root.pruned
         while not fixed or completed < self.budget.simulations:
             if stop_at is not None and perf_counter() >= stop_at:
                 break
@@ -453,9 +589,10 @@ class MCTSAgent(BaseAgent):
                 expanded = node.untried_actions[int(self.rng.integers(len(node.untried_actions)))]
                 node = node.expand(expanded)
                 created += 1
+                pruned += node.pruned
             # 3. Mô phỏng
             moves: list[Action] | None = [] if trace is not None else None
-            result = rollout(node.state, self.rng, stop_at, moves)
+            result = _ROLLOUTS[self.variant](node.state, self.rng, stop_at, moves)
             if result is None:
                 break  # hết giờ giữa rollout: bỏ mô phỏng, không cập nhật ngược
             # 4. Cập nhật ngược
@@ -466,7 +603,7 @@ class MCTSAgent(BaseAgent):
                        "leaf_terminal": node.is_terminal(), "rollout_moves": moves, "result": result})
         self.stats["simulations"] = completed
         self.stats["nodes_visited"] = created
-        self.stats["pruned_nodes"] = 0
+        self.stats["pruned_nodes"] = pruned
         self.last_root = root
         return root, fallback
 
@@ -475,3 +612,55 @@ class MCTSAgent(BaseAgent):
         root, fallback = self._search(board, player, self.deadline, None)
         action = best_action(root, self.rng)
         return fallback if action is None else action
+
+
+# ---------------------------------------------------------------------------
+# Hỗ trợ đánh giá: tổng hợp log lượt của runner play_match
+# ---------------------------------------------------------------------------
+
+_FAILED_STATUSES = ("timeout", "agent_error", "illegal_action")
+
+
+def summarize_series(records: Iterable[MatchRecord], logs: Iterable[Mapping[str, object]],
+                     agent: str) -> dict[str, object]:
+    """Tổng hợp một loạt ván của `agent` chơi qua play_match.
+
+    - W/D/L, điểm và số ván xử thua tính bằng summarize_results trên mọi ván, kể cả ván kết thúc
+      vì timeout hoặc lỗi.
+    - Độ trễ (summarize_latencies) và số mô phỏng chỉ lấy từ lượt có status "move": log timeout / lỗi
+      không có stats. Không có lượt "move" nào thì các giá trị này là None (chưa có dữ liệu).
+    - Lượt timeout / lỗi của `agent` được đếm riêng theo status.
+    `logs` chỉ gồm lượt của `agent`; lượt thiếu khóa "stats" hoặc "status" không làm hàm lỗi.
+    """
+    result = summarize_results(records, agent)
+    logs = list(logs)
+    moves = [entry for entry in logs if entry.get("status") == "move"]
+    failed = Counter(str(entry.get("status")) for entry in logs if entry.get("status") != "move")
+    latency = summarize_latencies([entry["elapsed_s"] for entry in moves])
+    simulations = [entry["stats"]["simulations"] for entry in moves]
+    return {"games": result["total"], "wins": result["wins"], "draws": result["draws"],
+            "losses": result["losses"], "score": result["score"],
+            "forfeits": sum(result["forfeits"].values()), "forfeit_reasons": result["forfeits"],
+            "moves": latency["count"], "failed_turns": dict(failed),
+            "latency_mean_s": latency["mean_s"], "latency_p95_s": latency["p95_s"],
+            "simulations_mean": float(np.mean(simulations)) if simulations else None,
+            "simulations_min": min(simulations) if simulations else None,
+            "simulations_max": max(simulations) if simulations else None}
+
+
+def check_series_logs(logs: Iterable[Mapping[str, object]], budget: SearchBudget,
+                      safety_timeout_s: float = 30.0) -> None:
+    """Kiểm tra toàn vẹn log lượt; phát sinh ValueError nếu sai.
+
+    Mọi lượt ghi đúng chế độ và giới hạn của cấu hình; status là "move" hoặc một lý do xử thua của
+    runner. Ở chế độ fixed, số mô phỏng chỉ được kiểm tra trên lượt "move" (lượt timeout / lỗi không có stats).
+    """
+    limit = budget.time_limit_s if budget.mode == "time" else safety_timeout_s
+    for entry in logs:
+        status = entry.get("status")
+        if status != "move" and status not in _FAILED_STATUSES:
+            raise ValueError(f"Lượt {entry.get('ply')}: status không hợp lệ {status!r}")
+        if entry.get("mode") != budget.mode or entry.get("limit_s") != limit:
+            raise ValueError(f"Lượt {entry.get('ply')}: sai chế độ hoặc giới hạn thời gian")
+        if status == "move" and budget.mode == "fixed"                 and entry["stats"]["simulations"] != budget.simulations:
+            raise ValueError(f"Lượt {entry.get('ply')}: số mô phỏng khác ngân sách {budget.simulations}")

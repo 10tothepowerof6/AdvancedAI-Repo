@@ -370,13 +370,13 @@ Nếu nhánh `main` có cập nhật mới trong quá trình mở PR:
 
 ## 11. Checklist bàn giao cuối cùng
 
-- [ ] Thuật toán triển khai đúng phạm vi phân công, tuân thủ nghiêm ngặt API chung và không sửa đổi mảng `board` gốc.
-- [ ] Bộ unit test riêng bao phủ đầy đủ các thành phần; toàn bộ test chung của dự án vẫn vượt qua thành công.
-- [ ] File notebook hoàn thiện đầy đủ 10 mục, có thể chạy trơn tru từ kernel mới; số liệu có cấu hình và seed rõ ràng.
-- [ ] Thông điệp commit, nội dung mô tả PR, chú thích code và đầu ra hiển thị đều sử dụng tiếng Việt chuẩn.
-- [ ] Mỗi giai đoạn được tổ chức trên một nhánh và PR riêng; giai đoạn trước đã được merge hoàn tất trước khi bắt đầu giai đoạn sau.
-- [ ] PR cung cấp đầy đủ tài liệu tham khảo, các hạn chế kỹ thuật và số liệu kiểm chứng thực tế.
-- [ ] Không đưa vào Git các file không liên quan, thư mục môi trường ảo (`.venv`) hoặc dữ liệu có dung lượng lớn.
+- [x] Thuật toán triển khai đúng phạm vi phân công, tuân thủ nghiêm ngặt API chung và không sửa đổi mảng `board` gốc.
+- [x] Bộ unit test riêng bao phủ đầy đủ các thành phần; toàn bộ test chung của dự án vẫn vượt qua thành công.
+- [x] File notebook hoàn thiện đầy đủ 10 mục, có thể chạy trơn tru từ kernel mới; số liệu có cấu hình và seed rõ ràng.
+- [x] Thông điệp commit, nội dung mô tả PR, chú thích code và đầu ra hiển thị đều sử dụng tiếng Việt chuẩn.
+- [x] Mỗi giai đoạn được tổ chức trên một nhánh và PR riêng; giai đoạn trước đã được merge hoàn tất trước khi bắt đầu giai đoạn sau.
+- [x] PR cung cấp đầy đủ tài liệu tham khảo, các hạn chế kỹ thuật và số liệu kiểm chứng thực tế.
+- [x] Không đưa vào Git các file không liên quan, thư mục môi trường ảo (`.venv`) hoặc dữ liệu có dung lượng lớn.
 - [ ] Nhóm trưởng xác nhận kiểm thử tích hợp thành công trước khi chính thức nghiệm thu phần việc.
 
 ---
@@ -504,7 +504,69 @@ chọn theo Q/N thay vì N, đếm mô phỏng bị bỏ, rollout từ trạng t
 - Với `budget` sai kiểu, `BaseAgent.choose_action` (file chung) báo `AttributeError` trước khi tới MCTS;
   kiểm tra `ValueError` của MCTS chỉ có hiệu lực khi gọi `search()` trực tiếp.
 
-*Trạng thái tài liệu: Giai đoạn 1–2 đã cài đặt và kiểm thử cục bộ; Giai đoạn 3 chưa thực hiện.*
+*Giai đoạn 2 đã merge qua PR #18 (08/11/2026).*
+
+### Giai đoạn 3 — Khảo sát ngân sách và bàn giao (nhánh `feature/mcts-evaluation`, 18/11/2026)
+
+**Biến thể có tên `tactical`** (`MCTSAgent(variant="tactical")`; mặc định `variant="standard"` giữ nguyên hành vi Giai đoạn 2):
+- **Ứng viên của mỗi nút** (`tactical_candidates`): bên đến lượt có ô thắng ngay thì chỉ giữ các ô đó; nếu không mà đối thủ có
+  ô thắng ngay thì chỉ giữ ô chặn; ngược lại giữ ứng viên bán kính 2. Số ứng viên bị bỏ cộng vào `pruned_nodes`
+  (bản chuẩn vẫn luôn 0).
+- **Rollout** (`tactical_rollout`): cùng luật đó ở mỗi nước, còn lại đi ô kế tiếp trong một hoán vị ngẫu nhiên như bản chuẩn.
+  Ô thắng ngay của hai bên được cập nhật dần sau mỗi nước (`_new_winning_cells`: chỉ xét 4 đường qua quân vừa đặt, lọc nhanh khi
+  đoạn 9 ô quanh quân có ít hơn 4 quân cùng màu), không quét lại toàn bàn.
+- Phần dùng chung: lựa chọn UCT, cập nhật ngược, quyết định cuối, ngân sách, bán kính, biên dừng.
+- Thử nghiệm sơ bộ trước khi chốt thiết kế (10 seed, 1.000 mô phỏng): chỉ đổi rollout mà giữ cách mở rộng thì **kém hơn** bản
+  chuẩn ở `thang_ngay` (0/10) và `chan_bon` (0/10). Rollout thông minh làm mọi nước của bên đang thắng cùng cho kết quả +1 nên nước
+  thắng ngay không còn nổi bật, còn nước trả lời bắt buộc của đối thủ vẫn bị chia lượt thăm với khoảng 50 nước khác. Vì vậy luật
+  được đưa vào cả bước mở rộng.
+
+**Kiểm thử:**
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_mcts_agent.py -v   # 147 passed, 0 failed (108 GĐ1–2 + 39 GĐ3)
+.\.venv\Scripts\python.exe -m pytest tests -v                      # 813 passed, 0 failed
+```
+Nhóm test Giai đoạn 3: `winning_cells` tính tay (bốn mở, bốn bị chặn, có khoảng trống, nối thành sáu) và đối chiếu với kiểm tra độc
+lập trên 12 thế ngẫu nhiên; thứ tự ưu tiên của `tactical_candidates` (thắng trước chặn, không lọc khi không có đe dọa, terminal);
+`tactical_rollout` đi nước thắng / chặn ở nước đầu, tuân theo luật ở **mọi** nước và phát lại trên engine đúng kết quả, không sửa
+trạng thái, dừng khi quá giờ; kiểm tra biến thể không hợp lệ; gốc tactical chỉ còn ô chặn và đếm `pruned_nodes` cả ở gốc lẫn nút
+sâu; bản chuẩn không lọc; tái lập theo seed; phát lại bốn bước trên engine; chế độ time dừng trước hạn; định dạng log của runner
+`play_match` ở `fixed` và `time`; gọi `summarize_results` / `summarize_latencies` của `evaluation/metrics.py` trên 4 ván và 5 độ trễ
+đã biết kết quả. Đã cố ý cài 4 lỗi (bỏ luật chặn trong rollout, đảo ưu tiên thắng/chặn, sai ngưỡng lọc nhanh, không cộng
+`pruned_nodes` ở nút sâu): mỗi lỗi đều làm test thất bại.
+
+**Notebook:** hoàn thiện mục 7–10 của `notebooks/03_mcts.ipynb` (khoảng 20–25 phút từ kernel mới trên máy ở Giai đoạn 0).
+- Cấu hình đóng băng: 6 vị trí (3 của mục 6 + `chan_ba_mo`, `tao_bon_mo`, `giua_van`), seed 0–9 (`fixed`) và 0–4 (`time`),
+  bán kính 2, c = √2, biên 0,1 giây.
+- Khảo sát bản chuẩn (5 vị trí có đáp án): đúng 3/50, 25/50, 30/50 ở 100 / 500 / 1.000 mô phỏng; 22/25 ở `time` 2,0 giây.
+  Khó nhất là `chan_ba_mo` (2/5 ở `time`). Lần chạy sau review không lượt nào chạm 2,0 giây; lần chạy trước có 1 lần (gọi agent
+  trực tiếp, vị trí `tao_bon_mo`).
+- Đấu `RandomAgent` qua `play_match`: 20/20 thắng ở `fixed` 1.000 và 20/20 ở `time` 2,0 giây; 0 timeout, 0 lỗi.
+- Biến thể `tactical`: `chan_ba_mo` 4/5 và `tao_bon_mo` 5/5 ở `time`; mỗi mô phỏng chậm hơn khoảng 2,5 lần. Đối đầu bản chuẩn:
+  17/20 khi cùng 1.000 mô phỏng, 6/10 khi cùng 2,0 giây (lần chạy trước 5/10; mẫu nhỏ, phụ thuộc máy).
+- Cấu hình bàn giao: `variant="standard"`, `time` 2,0 giây, c = √2, bán kính 2, biên 0,1 giây; `tactical` giữ làm biến thể có tên
+  cho giải đấu chính thức.
+
+**Hạn chế đã biết:**
+- Chưa đánh giá c, bán kính, tái sử dụng cây, đối thủ khác Random, giải đấu ≥ 100 ván/cặp và máy khác.
+- Đối đầu chế độ `time` chỉ có 10 ván, chưa đủ để kết luận bên mạnh hơn.
+- Biên dừng 0,1 giây là dừng hợp tác, không phải bảo đảm tuyệt đối: một lần chạy khảo sát mục 7 có 1 lần chạm mốc 2,0 giây (90 ván qua
+  runner không có timeout).
+- Số mô phỏng ở chế độ `time` phụ thuộc mạnh vào vị trí (vị trí có nước thắng ngay chạy nhiều hơn hàng chục lần) nên trung bình
+  số mô phỏng không so sánh trực tiếp được giữa hai biến thể.
+- Luật chiến thuật chỉ nhìn một nước; đe dọa kép vẫn là giới hạn của thế cờ.
+
+**Sửa theo review PR #59:** phần tổng hợp thi đấu ở mục 8–9 trước đây đọc `stats` của mọi lượt nên sẽ dừng notebook khi có lượt
+timeout / lỗi (log runner của các lượt này không có `stats`), và định dạng độ trễ `None` khi không có lượt hợp lệ.
+- Tách thành hai hàm thuần trong `agents/mcts_agent.py` để kiểm thử được:
+  - `summarize_series`: W/D/L, điểm, số ván xử thua trên mọi ván; độ trễ và số mô phỏng chỉ từ lượt `move`;
+    lượt timeout / lỗi đếm riêng; không có lượt `move` thì trả `None`.
+  - `check_series_logs`: kiểm tra chế độ / giới hạn ở mọi lượt, số mô phỏng chỉ ở lượt `move`.
+- Notebook hiển thị "chưa có dữ liệu" thay cho `None`, thêm cột `ván xử thua` và `lượt timeout/lỗi`.
+- 4 test mới: toàn bộ ván timeout ngay lượt đầu (dữ liệu dựng tay và ván thật qua `play_match` với agent luôn quá giờ),
+  hỗn hợp lượt `move` và lượt lỗi, log sai bị từ chối.
+
+*Trạng thái tài liệu: Giai đoạn 1–2 đã merge; Giai đoạn 3 mở PR #59, đã sửa theo review lần 1.*
 
 ---
 
